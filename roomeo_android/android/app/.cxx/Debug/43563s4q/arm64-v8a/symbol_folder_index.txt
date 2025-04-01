@@ -1,0 +1,1 @@
+/Users/omererdogan/flutter_apps/roomeoAndroid/roomeo_android/build/app/intermediates/cxx/Debug/43563s4q/obj/arm64-v8a
