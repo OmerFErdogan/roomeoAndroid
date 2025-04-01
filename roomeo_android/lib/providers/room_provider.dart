@@ -2,6 +2,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:collection/collection.dart';
+import 'package:roome_android/core/utils/message_event_bus.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async'; // Timer için
@@ -9,7 +10,9 @@ import 'dart:async'; // Timer için
 import '../core/error/exceptions.dart';
 import '../data/models/room.dart';
 import '../data/models/room_participant.dart';
+import '../data/models/message.dart';
 import '../data/repositories/room_repository.dart';
+import '../providers/message_provider.dart';
 
 class RoomProvider extends ChangeNotifier {
   final RoomRepository _repository = RoomRepository();
@@ -19,6 +22,8 @@ class RoomProvider extends ChangeNotifier {
   Map<int, WebSocketChannel?> _roomWebSockets = {};
   Map<int, bool> _roomConnectionStatus = {}; // Her oda için bağlantı durumu
   Map<int, Timer?> _pingTimers = {}; // Her oda için ping timer
+  Map<int, int> _reconnectAttempts = {}; // Yeniden bağlanma denemesi sayısı
+  Map<int, DateTime> _lastMessageTime = {}; // Son mesaj zaman damgası
   bool _isLoading = false;
   String? _error;
   Room? _activeRoom;
@@ -241,6 +246,9 @@ class RoomProvider extends ChangeNotifier {
       return;
     }
 
+    // Yeniden bağlanma denemesi sayısını sıfırla veya başlat
+    _reconnectAttempts[roomId] = 0;
+
     try {
       final prefs = await SharedPreferences.getInstance();
       final token = prefs.getString('token');
@@ -258,11 +266,18 @@ class RoomProvider extends ChangeNotifier {
       _roomWebSockets[roomId] = channel;
       _roomConnectionStatus[roomId] = true;
 
-      // Ping timer'ı başlat
+      // Ping timer'ı başlat - bağlantıyı aktif tutmak için
+      _pingTimers[roomId]?.cancel(); // Önceki timer varsa iptal et
       _pingTimers[roomId] = Timer.periodic(Duration(seconds: 30), (_) {
         if (_roomConnectionStatus[roomId] == true) {
           print('Sending ping to room $roomId');
-          channel.sink.add(jsonEncode({'type': 'ping'}));
+          try {
+            channel.sink.add(jsonEncode({'type': 'ping'}));
+          } catch (e) {
+            print('Error sending ping to room $roomId: $e');
+            _roomConnectionStatus[roomId] = false;
+            _reconnectWebSocket(roomId);
+          }
         }
       });
 
@@ -273,10 +288,14 @@ class RoomProvider extends ChangeNotifier {
         (data) {
           print('WebSocket data received for room $roomId: $data');
 
+          // Son mesaj zaman damgasını güncelle
+          _lastMessageTime[roomId] = DateTime.now();
+
           if (data is String) {
             if (data.contains('pong')) {
               // Pong yanıtını işle
               _roomConnectionStatus[roomId] = true;
+              print('Received pong from room $roomId');
               return;
             }
 
@@ -286,7 +305,8 @@ class RoomProvider extends ChangeNotifier {
               print('Room activity detected: $data');
               // Katılımcı listesini hemen güncelle
               fetchRoomParticipants(roomId);
-              // Oda katılımcı sayısını güncelle
+
+              // Mesaj balonları oluşturmadan sadece katılımcı sayısını güncelle
               _updateRoomParticipantCount(roomId);
               return;
             }
@@ -310,12 +330,14 @@ class RoomProvider extends ChangeNotifier {
           _roomConnectionStatus[roomId] = false;
           _reconnectWebSocket(roomId);
         },
+        cancelOnError: false, // Hata olsa bile dinlemeye devam et
       );
 
       print('WebSocket connection established for room $roomId');
     } catch (e) {
       print('WebSocket connection error for room $roomId: $e');
       _roomConnectionStatus[roomId] = false;
+      _reconnectWebSocket(roomId);
     }
     notifyListeners();
   }
@@ -324,36 +346,119 @@ class RoomProvider extends ChangeNotifier {
     print('Disconnecting WebSocket for room $roomId');
     _pingTimers[roomId]?.cancel();
     _pingTimers.remove(roomId);
+    _reconnectAttempts.remove(roomId);
 
     final ws = _roomWebSockets[roomId];
     if (ws != null) {
-      await ws.sink.close();
+      try {
+        await ws.sink.close();
+      } catch (e) {
+        print('Error closing WebSocket for room $roomId: $e');
+      }
       _roomWebSockets.remove(roomId);
     }
     _roomConnectionStatus[roomId] = false;
     notifyListeners();
   }
 
-  void _handleWebSocketMessage(int roomId, dynamic message) {
-    print('Processing WebSocket message for room $roomId: $message');
+  void _handleWebSocketMessage(int roomId, dynamic data) {
+    print('WebSocket data received for room $roomId: $data');
+    final eventBus = MessageEventBus();
 
-    if (message is String &&
-        (message.contains('joined the room') ||
-            message.contains('left the room'))) {
-      print('User activity detected in room $roomId: $message');
-      // Katılımcı listesini ve sayısını hemen güncelle
+    if (data is String) {
+      // Katılma/ayrılma mesajlarını özel olarak işle
+      if (data.contains('joined the room')) {
+        print('User joined room $roomId: $data');
+
+        // Sadece katılımcı listesini güncelle, mesaj oluşturma
+        fetchRoomParticipants(roomId);
+        _updateRoomParticipantCount(roomId);
+
+        // Katılma olayını yayınla
+        eventBus.publish(MessageEvent(
+          type: MessageEventType.userJoined,
+          roomId: roomId,
+          data: data,
+        ));
+
+        return;
+      }
+
+      if (data.contains('left the room')) {
+        print('User left room $roomId: $data');
+
+        // Sadece katılımcı listesini güncelle, mesaj oluşturma
+        fetchRoomParticipants(roomId);
+        _updateRoomParticipantCount(roomId);
+
+        // Ayrılma olayını yayınla
+        eventBus.publish(MessageEvent(
+          type: MessageEventType.userLeft,
+          roomId: roomId,
+          data: data,
+        ));
+
+        return;
+      }
+
+      // Ping/Pong mesajlarını işle
+      if (data.contains('pong')) {
+        _roomConnectionStatus[roomId] = true;
+        return;
+      }
+
+      // JSON mesajları parse et
+      try {
+        final message = jsonDecode(data);
+        if (message is Map<String, dynamic>) {
+          _processMessageData(roomId, message);
+        }
+      } catch (e) {
+        print('Error parsing WebSocket message: $e');
+        print('Raw message: $data');
+      }
+    } else if (data is Map<String, dynamic>) {
+      _processMessageData(roomId, data);
+    }
+  }
+
+  void _processMessageData(int roomId, Map<String, dynamic> data) {
+    final eventBus = MessageEventBus();
+
+    if (data['type'] == 'participants_update') {
+      print('Participants update received for room $roomId');
+      // Katılımcı listesi güncellemesi
       fetchRoomParticipants(roomId);
       _updateRoomParticipantCount(roomId);
-      return;
-    }
 
-    if (message is Map<String, dynamic>) {
-      if (message['type'] == 'participants_update') {
-        print('Participants update received for room $roomId');
-        // Katılımcı listesi güncellemesi
-        fetchRoomParticipants(roomId);
-        // Katılımcı sayısını güncelle
-        _updateRoomParticipantCount(roomId);
+      eventBus.publish(MessageEvent(
+        type: MessageEventType.roomUpdated,
+        roomId: roomId,
+        data: data,
+      ));
+    } else {
+      try {
+        // Message nesnesine dönüştür
+        final message = Message.fromJson(data);
+
+        // Join/Leave mesajlarını filtreleme
+        if (message.messageType == 'system' &&
+            (message.content.contains('joined the room') ||
+                message.content.contains('left the room'))) {
+          print('System message filtered: ${message.content}');
+          return;
+        }
+
+        // Diğer tüm mesajları yayınla
+        print('Publishing normal message event: ${message.content}');
+        eventBus.publish(MessageEvent(
+          type: MessageEventType.received,
+          roomId: roomId,
+          message: message,
+        ));
+      } catch (e) {
+        print('Error processing message data: $e');
+        print('Raw data: $data');
       }
     }
   }
@@ -388,14 +493,48 @@ class RoomProvider extends ChangeNotifier {
   }
 
   Future<void> _reconnectWebSocket(int roomId) async {
-    print('Attempting to reconnect WebSocket for room $roomId');
+    // Yeniden bağlanma deneme sayısını artır
+    final attempts = (_reconnectAttempts[roomId] ?? 0) + 1;
+    _reconnectAttempts[roomId] = attempts;
+
+    // Maksimum deneme sayısını kontrol et (5 deneme)
+    if (attempts > 5) {
+      print(
+          'Maximum reconnection attempts reached for room $roomId. Giving up.');
+      return;
+    }
+
+    // Üstel geri çekilme ile bekleme süresi
+    final delay = Duration(seconds: attempts * 2);
+    print(
+        'Attempting to reconnect WebSocket for room $roomId (Attempt $attempts) after $delay');
+
     await _disconnectFromRoomWebSocket(roomId);
-    await Future.delayed(Duration(seconds: 5));
-    if (_activeRoom?.roomId == roomId) {
-      await _connectToRoomWebSocket(roomId);
+    await Future.delayed(delay);
+
+    // Eğer bu aktif oda ise veya 30 dakikadan az zaman geçmişse yeniden bağlan
+    final lastMessageTime =
+        _lastMessageTime[roomId] ?? DateTime.now().subtract(Duration(days: 1));
+    final timeElapsed = DateTime.now().difference(lastMessageTime);
+
+    if (_activeRoom?.roomId == roomId || timeElapsed.inMinutes < 30) {
+      try {
+        await _connectToRoomWebSocket(roomId);
+        if (_roomConnectionStatus[roomId] == true) {
+          // Bağlantı başarılı oldu, deneme sayısını sıfırla
+          _reconnectAttempts[roomId] = 0;
+          print('Successfully reconnected to room $roomId');
+        }
+      } catch (e) {
+        print('Failed to reconnect to room $roomId: $e');
+      }
+    } else {
+      print(
+          'Not reconnecting to inactive room $roomId (Last activity: ${timeElapsed.inMinutes} minutes ago)');
     }
   }
 
+  // Oda arama
   Future<List<Room>> searchRooms(String query) async {
     try {
       print('Searching rooms with query: "$query"');
@@ -445,6 +584,32 @@ class RoomProvider extends ChangeNotifier {
       print('Error refreshing room details for room $roomId: $e');
       rethrow;
     }
+  }
+
+  // WebSocket bağlantı durumunu periyodik olarak kontrol et
+  void startConnectionHealthCheck() {
+    Timer.periodic(Duration(minutes: 1), (timer) {
+      _roomWebSockets.keys.forEach((roomId) {
+        // Son mesaj alımından beri geçen süreyi kontrol et
+        final lastMessageTime = _lastMessageTime[roomId] ??
+            DateTime.now().subtract(Duration(minutes: 5));
+        final timeElapsed = DateTime.now().difference(lastMessageTime);
+
+        // 3 dakikadan fazla mesaj gelmemişse ve bağlantı açık görünüyorsa, ping gönder
+        if (timeElapsed.inMinutes > 3 &&
+            (_roomConnectionStatus[roomId] ?? false)) {
+          print(
+              'No messages received for room $roomId in ${timeElapsed.inMinutes} minutes. Sending health check ping.');
+          try {
+            _roomWebSockets[roomId]?.sink.add(jsonEncode({'type': 'ping'}));
+          } catch (e) {
+            print('Error during health check for room $roomId: $e');
+            _roomConnectionStatus[roomId] = false;
+            _reconnectWebSocket(roomId);
+          }
+        }
+      });
+    });
   }
 
   @override

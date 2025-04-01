@@ -1,3 +1,4 @@
+// lib/data/models/message.dart
 class Message {
   final int messageId;
   final int roomId;
@@ -22,17 +23,36 @@ class Message {
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
-    return Message(
-      messageId: json['message_id'],
-      roomId: json['room_id'],
-      userId: json['user_id'],
-      username: json['username'],
-      content: json['content'],
-      messageType: json['message_type'],
-      createdAt: DateTime.parse(json['created_at']),
-      updatedAt: DateTime.parse(json['updated_at']),
-      isDeleted: json['is_deleted'] ?? false,
-    );
+    try {
+      return Message(
+        messageId: json['message_id'] ?? -1, // Null güvenli
+        roomId: json['room_id'] ?? -1, // Null güvenli
+        userId: json['user_id'] ?? -1, // Null güvenli
+        username: json['username'] ?? 'Anonim',
+        content: json['content'] ?? '',
+        messageType: json['message_type'] ?? 'text',
+        createdAt: DateTime.parse(
+            json['created_at'] ?? DateTime.now().toIso8601String()),
+        updatedAt: DateTime.parse(
+            json['updated_at'] ?? DateTime.now().toIso8601String()),
+        isDeleted: json['is_deleted'] ?? false,
+      );
+    } catch (e) {
+      print('Message parsing error: $e');
+      print('Raw JSON: $json');
+      // Hata durumunda varsayılan bir mesaj döndür
+      return Message(
+        messageId: -1,
+        roomId: -1,
+        userId: -1,
+        username: 'Hata',
+        content: 'Mesaj gösterilemedi',
+        messageType: 'error',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        isDeleted: false,
+      );
+    }
   }
 
   Map<String, dynamic> toJson() {

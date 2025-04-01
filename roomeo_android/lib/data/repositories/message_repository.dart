@@ -47,6 +47,8 @@ class MessageRepository {
 
   Future<Message> sendMessage(int roomId, String content) async {
     try {
+      print('Sending message to room $roomId: $content');
+
       final response = await _dio.post(
         '/rooms/$roomId/messages',
         data: {
@@ -55,12 +57,34 @@ class MessageRepository {
         },
       );
 
+      print('Message send response: ${response.data}'); // Debug log
+
       if (response.statusCode == 201 || response.statusCode == 200) {
-        return Message.fromJson(response.data);
+        try {
+          return Message.fromJson(response.data);
+        } catch (parseError) {
+          print('Error parsing message response: $parseError');
+          print('Response data: ${response.data}');
+
+          // Manuel olarak oluştur
+          return Message(
+            messageId: -1,
+            roomId: roomId,
+            userId: -1,
+            username: 'Sistem',
+            content: content,
+            messageType: 'text',
+            createdAt: DateTime.now(),
+            updatedAt: DateTime.now(),
+          );
+        }
       }
 
       throw NetworkException('Failed to send message');
     } on DioException catch (e) {
+      print('Dio error sending message: ${e.message}');
+      print('Response data: ${e.response?.data}');
+
       if (e.response?.statusCode == 401) {
         throw AuthException('Unauthorized access');
       } else if (e.response?.statusCode == 403) {
@@ -71,6 +95,9 @@ class MessageRepository {
       throw NetworkException(
         e.response?.data?['error'] ?? 'Failed to send message',
       );
+    } catch (e) {
+      print('Unexpected error sending message: $e');
+      throw NetworkException('Failed to send message: $e');
     }
   }
 

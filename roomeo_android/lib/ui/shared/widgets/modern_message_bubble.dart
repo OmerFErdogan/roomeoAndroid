@@ -17,6 +17,14 @@ class ModernMessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Mesaj içeriği boşsa veya "joined the room" veya "left the room" içeriyorsa gösterme
+    if (message.content.trim().isEmpty ||
+        (message.messageType == 'system' &&
+            (message.content.contains('joined the room') ||
+                message.content.contains('left the room')))) {
+      return SizedBox.shrink(); // Hiçbir şey gösterme
+    }
+
     final currentUser = context.read<AuthProvider>().currentUser;
     final isCurrentUser = message.userId == currentUser?.id;
     final isSystemMessage = message.messageType == 'system';

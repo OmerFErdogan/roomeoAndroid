@@ -4,14 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
+
 import '../../../data/models/room.dart';
 import '../../../data/models/room_participant.dart';
 import '../../../data/models/message.dart';
 import '../../../providers/auth_provider.dart';
 import '../../../providers/room_provider.dart';
 import '../../../providers/message_provider.dart';
+import '../../../core/utils/message_event_bus.dart';
 import '../../shared/styles/modern_theme.dart';
 import '../../shared/widgets/modern_button.dart';
+import '../chat/realtime_chat.dart';
 
 class RoomDetailScreen extends StatefulWidget {
   final Room room;
@@ -27,12 +30,11 @@ class RoomDetailScreen extends StatefulWidget {
 
 class _RoomDetailScreenState extends State<RoomDetailScreen>
     with TickerProviderStateMixin {
-  final _messageController = TextEditingController();
-  final _scrollController = ScrollController();
-  bool _isExpanded = false;
-  bool _isExiting = false;
   late TabController _tabController;
   Timer? _autoRefreshTimer;
+  bool _isExiting = false;
+  bool _isLoading = false;
+  StreamSubscription<MessageEvent>? _eventSubscription;
 
   @override
   void initState() {
@@ -44,6 +46,23 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
       _initializeRoom();
     });
 
+    // Event Bus'ı dinle - sadece katılımcı güncellemeleri için
+    final eventBus = MessageEventBus();
+    _eventSubscription =
+        eventBus.listenForRoom(widget.room.roomId).listen((event) {
+      if (mounted) {
+        // Katılımcı güncellemesi gerektiğinde
+        if (event.type == MessageEventType.userJoined ||
+            event.type == MessageEventType.userLeft ||
+            event.type == MessageEventType.roomUpdated) {
+          _refreshRoomData();
+        }
+
+        // NOT: Mesaj olaylarıyla ilgili işlemler RealtimeChat widget'ında yapılıyor!
+        // Mesaj scroll işlemlerini burada yapmıyoruz.
+      }
+    });
+
     // Periyodik olarak oda bilgilerini güncelle (özellikle katılımcı sayısı için)
     _autoRefreshTimer = Timer.periodic(Duration(seconds: 30), (_) {
       if (mounted) {
@@ -53,15 +72,16 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   Future<void> _initializeRoom() async {
+    setState(() {
+      _isLoading = true;
+    });
+
     try {
       // Odaya giriş yap
       await context.read<RoomProvider>().enterRoom(widget.room.roomId);
 
       // Mesajları yükle
       await context.read<MessageProvider>().loadMessages(widget.room.roomId);
-
-      // Sayfa yüklendikten sonra otomatik olarak aşağı kaydır
-      Future.delayed(Duration(milliseconds: 500), _scrollToBottom);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -70,6 +90,12 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
             backgroundColor: ModernTheme.error,
           ),
         );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
       }
     }
   }
@@ -85,22 +111,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     }
   }
 
-  void _scrollToBottom() {
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-    }
-  }
-
   @override
   void dispose() {
-    _messageController.dispose();
-    _scrollController.dispose();
     _tabController.dispose();
     _autoRefreshTimer?.cancel();
+    _eventSubscription?.cancel();
 
     // Sayfa kapanırken odadan çık
     if (!_isExiting) {
@@ -115,74 +130,91 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     return Scaffold(
       backgroundColor: ModernTheme.backgroundLight,
       body: SafeArea(
-        child: Column(
-          children: [
-            _buildRoomHeader(),
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(ModernTheme.borderRadius * 2),
-                    topRight: Radius.circular(ModernTheme.borderRadius * 2),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      offset: Offset(0, -2),
-                      blurRadius: 10,
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(ModernTheme.borderRadius * 2),
-                    topRight: Radius.circular(ModernTheme.borderRadius * 2),
-                  ),
-                  child: Column(
-                    children: [
-                      // Tab Bar
-                      Container(
+        child: _isLoading
+            ? _buildLoadingState()
+            : Column(
+                children: [
+                  _buildRoomHeader(),
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
                         color: Colors.white,
-                        child: TabBar(
-                          controller: _tabController,
-                          indicatorColor: ModernTheme.primary,
-                          labelColor: ModernTheme.primary,
-                          unselectedLabelColor: ModernTheme.textSecondary,
-                          tabs: [
-                            Tab(text: 'Sohbet'),
-                            Tab(text: 'Katılımcılar'),
-                          ],
+                        borderRadius: BorderRadius.only(
+                          topLeft:
+                              Radius.circular(ModernTheme.borderRadius * 2),
+                          topRight:
+                              Radius.circular(ModernTheme.borderRadius * 2),
                         ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            offset: Offset(0, -2),
+                            blurRadius: 10,
+                          ),
+                        ],
                       ),
-
-                      // Tab İçerikleri
-                      Expanded(
-                        child: TabBarView(
-                          controller: _tabController,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.only(
+                          topLeft:
+                              Radius.circular(ModernTheme.borderRadius * 2),
+                          topRight:
+                              Radius.circular(ModernTheme.borderRadius * 2),
+                        ),
+                        child: Column(
                           children: [
-                            // Sohbet Sekmesi
-                            Column(
-                              children: [
-                                Expanded(
-                                  child: _buildChatSection(),
-                                ),
-                                _buildMessageInput(),
-                              ],
+                            // Tab Bar
+                            Container(
+                              color: Colors.white,
+                              child: TabBar(
+                                controller: _tabController,
+                                indicatorColor: ModernTheme.primary,
+                                labelColor: ModernTheme.primary,
+                                unselectedLabelColor: ModernTheme.textSecondary,
+                                tabs: [
+                                  Tab(text: 'Sohbet'),
+                                  Tab(text: 'Katılımcılar'),
+                                ],
+                              ),
                             ),
 
-                            // Katılımcılar Sekmesi
-                            _buildParticipantsTab(),
+                            // Tab İçerikleri
+                            Expanded(
+                              child: TabBarView(
+                                controller: _tabController,
+                                children: [
+                                  // Sohbet Sekmesi
+                                  RealtimeChat(roomId: widget.room.roomId),
+
+                                  // Katılımcılar Sekmesi
+                                  _buildParticipantsTab(),
+                                ],
+                              ),
+                            ),
                           ],
                         ),
                       ),
-                    ],
+                    ),
                   ),
-                ),
+                ],
               ),
-            ),
-          ],
-        ),
+      ),
+    );
+  }
+
+  Widget _buildLoadingState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(ModernTheme.primary),
+          ),
+          SizedBox(height: 16),
+          Text(
+            'Oda yükleniyor...',
+            style: ModernTheme.bodyStyle,
+          ),
+        ],
       ),
     );
   }
@@ -490,381 +522,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     }
   }
 
-  Widget _buildChatSection() {
-    return Container(
-      color: ModernTheme.backgroundLight,
-      child: Consumer<MessageProvider>(
-        builder: (context, messageProvider, child) {
-          if (messageProvider.isLoadingForRoom(widget.room.roomId)) {
-            return Center(
-              child: CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(ModernTheme.primary),
-              ),
-            );
-          }
-
-          final messages =
-              messageProvider.getMessagesForRoom(widget.room.roomId);
-
-          if (messages.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.chat_bubble_outline,
-                    size: 64,
-                    color: ModernTheme.textSecondary.withOpacity(0.5),
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    'Henüz mesaj yok',
-                    style: ModernTheme.titleStyle,
-                    textAlign: TextAlign.center,
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'İlk mesajı sen gönder!',
-                    style: ModernTheme.captionStyle,
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            );
-          }
-
-          // Mesajları tarihe göre sırala - ÖNEMLİ!
-          final sortedMessages = List<Message>.from(messages)
-            ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-
-          return ListView.builder(
-            controller: _scrollController,
-            padding: EdgeInsets.all(16),
-            itemCount: sortedMessages.length,
-            itemBuilder: (context, index) {
-              final message = sortedMessages[index];
-              final showDate = index == 0 ||
-                  !_isSameDay(
-                    sortedMessages[index - 1].createdAt,
-                    message.createdAt,
-                  );
-
-              return Column(
-                children: [
-                  if (showDate) _buildDateDivider(message.createdAt),
-                  _buildMessageBubble(message),
-                ],
-              );
-            },
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildDateDivider(DateTime date) {
-    return Container(
-      margin: EdgeInsets.symmetric(vertical: 16),
-      child: Row(
-        children: [
-          Expanded(child: Divider()),
-          Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16),
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: ModernTheme.primary.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                _formatFullDate(date),
-                style: ModernTheme.captionStyle.copyWith(
-                  color: ModernTheme.primary,
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ),
-          Expanded(child: Divider()),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMessageBubble(Message message) {
-    // Mesaj sahibini kontrol et
-    final currentUser = context.read<AuthProvider>().currentUser;
-    final isCurrentUser = message.userId == currentUser?.id;
-    final isSystemMessage = message.messageType == 'system';
-
-    if (isSystemMessage) {
-      return _buildSystemMessage(message);
-    }
-
-    return Padding(
-      padding: EdgeInsets.only(bottom: 12),
-      child: Row(
-        mainAxisAlignment:
-            isCurrentUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          if (!isCurrentUser) _buildMessageAvatar(message),
-          SizedBox(width: !isCurrentUser ? 8 : 0),
-          Container(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.7,
-            ),
-            decoration: BoxDecoration(
-              color: isCurrentUser ? ModernTheme.primary : Colors.white,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(isCurrentUser ? 16 : 4),
-                topRight: Radius.circular(isCurrentUser ? 4 : 16),
-                bottomLeft: Radius.circular(16),
-                bottomRight: Radius.circular(16),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.05),
-                  offset: Offset(0, 1),
-                  blurRadius: 3,
-                ),
-              ],
-            ),
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (!isCurrentUser) ...[
-                  Text(
-                    message.username,
-                    style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 12,
-                      color: isCurrentUser
-                          ? Colors.white.withOpacity(0.9)
-                          : ModernTheme.primary,
-                    ),
-                  ),
-                  SizedBox(height: 4),
-                ],
-                Text(
-                  message.content,
-                  style: TextStyle(
-                    color:
-                        isCurrentUser ? Colors.white : ModernTheme.textPrimary,
-                    fontSize: 15,
-                  ),
-                ),
-                SizedBox(height: 4),
-                Align(
-                  alignment: Alignment.bottomRight,
-                  child: Text(
-                    _formatTime(message.createdAt),
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: isCurrentUser
-                          ? Colors.white.withOpacity(0.7)
-                          : ModernTheme.textSecondary.withOpacity(0.7),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMessageAvatar(Message message) {
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        color: ModernTheme.primary.withOpacity(0.1),
-        shape: BoxShape.circle,
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        message.username.isNotEmpty ? message.username[0].toUpperCase() : '?',
-        style: TextStyle(
-          color: ModernTheme.primary,
-          fontWeight: FontWeight.bold,
-          fontSize: 14,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSystemMessage(Message message) {
-    return Container(
-      width: double.infinity,
-      margin: EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: Divider(color: ModernTheme.borderColor),
-          ),
-          Container(
-            margin: EdgeInsets.symmetric(horizontal: 12),
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(
-              color: ModernTheme.textSecondary.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              message.content,
-              style: TextStyle(
-                fontSize: 12,
-                fontStyle: FontStyle.italic,
-                color: ModernTheme.textSecondary,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Divider(color: ModernTheme.borderColor),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMessageInput() {
-    return Container(
-      padding: EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            offset: Offset(0, -2),
-            blurRadius: 4,
-            color: Colors.black.withOpacity(0.05),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        child: Row(
-          children: [
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: ModernTheme.backgroundLight,
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(
-                    color: ModernTheme.borderColor,
-                    width: 1,
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Padding(
-                      padding: EdgeInsets.only(left: 16),
-                      child: Icon(
-                        Icons.emoji_emotions_outlined,
-                        color: ModernTheme.textSecondary,
-                        size: 20,
-                      ),
-                    ),
-                    Expanded(
-                      child: TextField(
-                        controller: _messageController,
-                        decoration: InputDecoration(
-                          hintText: 'Mesajınızı yazın...',
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.all(16),
-                        ),
-                        maxLines: null,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _sendMessage(),
-                      ),
-                    ),
-                    IconButton(
-                      icon: Icon(
-                        Icons.attach_file,
-                        color: ModernTheme.textSecondary,
-                        size: 20,
-                      ),
-                      onPressed: () {
-                        // Dosya ekleme fonksiyonu
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            SizedBox(width: 8),
-            GestureDetector(
-              onTap: _sendMessage,
-              child: Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: ModernTheme.primary,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.send,
-                  color: Colors.white,
-                  size: 20,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _sendMessage() async {
-    final content = _messageController.text.trim();
-    if (content.isEmpty) return;
-
-    try {
-      await context.read<MessageProvider>().sendMessage(
-            widget.room.roomId,
-            content,
-          );
-      _messageController.clear();
-
-      // Mesaj gönderildikten sonra otomatik olarak aşağı kaydır
-      Future.delayed(Duration(milliseconds: 300), _scrollToBottom);
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Mesaj gönderilemedi: $e'),
-          backgroundColor: ModernTheme.error,
-        ),
-      );
-    }
-  }
-
   String _formatDate(DateTime date) {
     return '${date.day}.${date.month}.${date.year}';
-  }
-
-  String _formatFullDate(DateTime date) {
-    final now = DateTime.now();
-    if (date.year == now.year &&
-        date.month == now.month &&
-        date.day == now.day) {
-      return 'Bugün';
-    }
-    if (date.year == now.year &&
-        date.month == now.month &&
-        date.day == now.day - 1) {
-      return 'Dün';
-    }
-    return '${date.day}.${date.month}.${date.year}';
-  }
-
-  String _formatTime(DateTime date) {
-    final localDate = date.toLocal();
-    return '${localDate.hour.toString().padLeft(2, '0')}:${localDate.minute.toString().padLeft(2, '0')}';
-  }
-
-  bool _isSameDay(DateTime date1, DateTime date2) {
-    return date1.year == date2.year &&
-        date1.month == date2.month &&
-        date1.day == date2.day;
   }
 }

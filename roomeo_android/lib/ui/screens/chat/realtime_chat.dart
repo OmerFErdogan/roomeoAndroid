@@ -1,6 +1,5 @@
 // lib/ui/screens/chat/realtime_chat.dart
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../data/models/message.dart';
@@ -13,7 +12,10 @@ import '../../shared/styles/modern_theme.dart';
 class RealtimeChat extends StatefulWidget {
   final int roomId;
 
-  const RealtimeChat({Key? key, required this.roomId}) : super(key: key);
+  const RealtimeChat({
+    Key? key,
+    required this.roomId,
+  }) : super(key: key);
 
   @override
   _RealtimeChatState createState() => _RealtimeChatState();
@@ -22,14 +24,13 @@ class RealtimeChat extends StatefulWidget {
 class _RealtimeChatState extends State<RealtimeChat> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
-  // Değişiklik: _eventSubscription artık nullable
-  StreamSubscription<MessageEvent>? _eventSubscription;
+  late StreamSubscription<MessageEvent> _eventSubscription;
   bool _isInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    // Ekran oluşturulduktan sonra mesajları yükle
+    // Mesajları yükledikten sonra initialize et
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeChat();
     });
@@ -41,30 +42,30 @@ class _RealtimeChatState extends State<RealtimeChat> {
     final messageProvider = context.read<MessageProvider>();
 
     try {
+      // İlk mesajları yükle (MessageProvider içerisinde listenize eklenen notifyListeners() olduğundan emin olun)
       await messageProvider.loadMessages(widget.roomId);
       print(
           "Initial messages loaded. Count: ${messageProvider.getSortedMessagesForRoom(widget.roomId).length}");
 
-      // Event bus'tan gelen mesaj eventlerini dinle
+      // Event Bus'tan gelen mesaj eventlerini dinle
       final eventBus = MessageEventBus();
       _eventSubscription =
           eventBus.listenForRoom(widget.roomId).listen((event) {
         print('RealtimeChat: Received event ${event.type}');
         if (event.type == MessageEventType.received ||
             event.type == MessageEventType.sent) {
+          // Yeni mesaj geldiğinde UI'ın güncellendiğinden emin olmak için (provider notifyListeners() çağrısı varsa Consumer otomatik rebuild olur)
           if (mounted) {
-            Future.delayed(Duration(milliseconds: 100), () {
-              if (mounted) _scrollToBottom();
-            });
+            _scrollToBottom();
           }
         }
       });
 
+      // İlk yüklemeden sonra da aşağı kaydır
       if (mounted) {
-        Future.delayed(Duration(milliseconds: 300), () {
-          if (mounted) _scrollToBottom();
-        });
+        _scrollToBottom();
       }
+
       _isInitialized = true;
     } catch (e) {
       print('Error initializing chat: $e');
@@ -75,8 +76,7 @@ class _RealtimeChatState extends State<RealtimeChat> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
-    // Değişiklik: _eventSubscription? ile null kontrolü yapılıyor
-    _eventSubscription?.cancel();
+    _eventSubscription.cancel();
     super.dispose();
   }
 
@@ -105,7 +105,7 @@ class _RealtimeChatState extends State<RealtimeChat> {
       int userId = currentUser?.id ?? -1;
       String username = currentUser?.username ?? 'Ben';
 
-      // Yerel mesaj nesnesi oluştur
+      // Yerel mesaj nesnesi oluşturuluyor
       final localMessage = Message(
         messageId: -999, // Geçici ID
         roomId: widget.roomId,
@@ -117,17 +117,27 @@ class _RealtimeChatState extends State<RealtimeChat> {
         updatedAt: DateTime.now(),
       );
 
-      // Yerel mesajı ekle ve UI'ı güncelle
-      await context.read<MessageProvider>().sendMessage(widget.roomId, content,
-          userId: userId, username: username);
+      // Yerel mesajı event bus üzerinden yayınla (MessageProvider'ın _addMessageToRoom() çağırıp notifyListeners yapması gerekiyor)
+      final eventBus = MessageEventBus();
+      eventBus.publish(MessageEvent(
+        type: MessageEventType.sent,
+        roomId: widget.roomId,
+        message: localMessage,
+      ));
+      print("Local message published via event bus");
+
+      // MessageProvider üzerinden mesajı gönder (bu işlem içinde provider listeneleri güncellemeli)
+      await context.read<MessageProvider>().sendMessage(widget.roomId, content);
       print("sendMessage() completed");
 
-      if (mounted) _scrollToBottom();
+      if (mounted) {
+        _scrollToBottom();
+      }
     } catch (e) {
       print('Error sending message: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Mesaj gönderilemedi: ${e.toString()}'),
+          content: Text('Mesaj gönderilemedi: $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -185,7 +195,10 @@ class _RealtimeChatState extends State<RealtimeChat> {
             itemBuilder: (context, index) {
               final message = messages[index];
               final showDate = index == 0 ||
-                  !_isSameDay(messages[index - 1].createdAt, message.createdAt);
+                  !_isSameDay(
+                    messages[index - 1].createdAt,
+                    message.createdAt,
+                  );
               return Column(
                 children: [
                   if (showDate) _buildDateDivider(message.createdAt),
@@ -259,9 +272,10 @@ class _RealtimeChatState extends State<RealtimeChat> {
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-              offset: Offset(0, -2),
-              blurRadius: 4,
-              color: Colors.black.withOpacity(0.05))
+            offset: Offset(0, -2),
+            blurRadius: 4,
+            color: Colors.black.withOpacity(0.05),
+          ),
         ],
       ),
       child: Row(
@@ -271,14 +285,20 @@ class _RealtimeChatState extends State<RealtimeChat> {
               decoration: BoxDecoration(
                 color: ModernTheme.backgroundLight,
                 borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: ModernTheme.borderColor, width: 1),
+                border: Border.all(
+                  color: ModernTheme.borderColor,
+                  width: 1,
+                ),
               ),
               child: Row(
                 children: [
                   Padding(
                     padding: EdgeInsets.only(left: 16),
-                    child: Icon(Icons.emoji_emotions_outlined,
-                        color: ModernTheme.textSecondary, size: 20),
+                    child: Icon(
+                      Icons.emoji_emotions_outlined,
+                      color: ModernTheme.textSecondary,
+                      size: 20,
+                    ),
                   ),
                   Expanded(
                     child: TextField(
@@ -300,7 +320,9 @@ class _RealtimeChatState extends State<RealtimeChat> {
           SizedBox(width: 8),
           Container(
             decoration: BoxDecoration(
-                color: ModernTheme.primary, shape: BoxShape.circle),
+              color: ModernTheme.primary,
+              shape: BoxShape.circle,
+            ),
             child: IconButton(
               icon: Icon(Icons.send, color: Colors.white, size: 20),
               onPressed: _sendMessage,
