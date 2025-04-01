@@ -1,3 +1,4 @@
+// lib/data/models/room.dart
 import 'room_participant.dart';
 
 class Room {
@@ -34,9 +35,10 @@ class Room {
   });
 
   factory Room.fromJson(Map<String, dynamic> json) {
-    // Oda tipi kontrolü
-    print('Room JSON from API: $json'); // Debug için JSON'ı logla
+    // Debug JSON'ı logla
+    print('Room JSON from API: $json');
 
+    // Oda tipi kontrolü
     final roomType = (json['room_type'] as String?)?.isEmpty ?? true
         ? 'normal'
         : json['room_type'];
@@ -60,6 +62,15 @@ class Room {
       // Sadece aktif ve banlanmamış katılımcıları say
       currentParticipants =
           participants.where((p) => p.isActive && !p.isBanned).length;
+
+      // Aktif katılımcı sayısını loglayalım
+      print(
+          'Room ${json['room_id']} - Active participants: $currentParticipants');
+    } else {
+      // Participants yoksa API'den doğrudan current_participants değerini kullanmayı dene
+      currentParticipants = json['current_participants'] ?? 0;
+      print(
+          'Room ${json['room_id']} - Using API participant count: $currentParticipants');
     }
 
     return Room(
@@ -114,6 +125,16 @@ class Room {
     );
   }
 
+  // Katılımcı sayısını yeniden hesaplar ve günceller
+  Room updateParticipantCount() {
+    if (participants != null) {
+      final count =
+          participants!.where((p) => p.isActive && !p.isBanned).length;
+      return copyWith(currentParticipants: count);
+    }
+    return this;
+  }
+
   // Yardımcı getterlar
   String get participantDisplay => "$currentParticipants/$maxParticipants";
   bool get isPremium => roomType == 'premium';
@@ -126,6 +147,25 @@ class Room {
   // Debug için toString metodu
   @override
   String toString() {
-    return 'Room(roomId: $roomId, name: $name, isPrivate: $isPrivate, accessCode: $accessCode)';
+    return 'Room(roomId: $roomId, name: $name, participants: $currentParticipants/$maxParticipants, isPrivate: $isPrivate)';
+  }
+
+  // JSON'a dönüştürme
+  Map<String, dynamic> toJson() {
+    return {
+      'room_id': roomId,
+      'name': name,
+      'description': description,
+      'room_type': roomType,
+      'created_at': createdAt.toIso8601String(),
+      'updated_at': updatedAt.toIso8601String(),
+      'max_participants': maxParticipants,
+      'is_private': isPrivate,
+      'created_by': createdBy,
+      'status': status,
+      'access_code': accessCode,
+      'current_participants': currentParticipants,
+      'role': role,
+    };
   }
 }

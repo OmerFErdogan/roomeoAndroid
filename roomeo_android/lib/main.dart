@@ -12,7 +12,7 @@ import 'ui/screens/rooms/create_room_screen.dart';
 import 'ui/screens/rooms/room_detail_screen.dart';
 import 'ui/screens/rooms/search_room_screen.dart';
 import 'data/models/room.dart';
-import 'ui/shared/styles/cartoon_theme.dart'; // Import cartoon theme
+import 'ui/shared/styles/modern_theme.dart'; // Modern tema import edildi
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -45,7 +45,7 @@ class MyApp extends StatelessWidget {
       child: MaterialApp(
         title: 'Study Rooms',
         debugShowCheckedModeBanner: false,
-        theme: CartoonTheme.themeData, // Burada kartun temasını uyguluyoruz
+        theme: ModernTheme.themeData, // Modern temayı kullanıyoruz
         home: Consumer<AuthProvider>(
           builder: (context, auth, _) =>
               auth.isLoggedIn ? HomeScreen() : LoginScreen(),

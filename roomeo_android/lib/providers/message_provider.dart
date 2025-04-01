@@ -1,5 +1,5 @@
+// lib/providers/message_provider.dart
 import 'package:flutter/material.dart';
-
 import '../data/models/message.dart';
 import '../data/repositories/message_repository.dart';
 
@@ -14,6 +14,14 @@ class MessageProvider extends ChangeNotifier {
   bool isLoadingForRoom(int roomId) => _isLoadingMap[roomId] ?? false;
   String? get error => _error;
 
+  // Sıralı mesajları almak için yeni metod
+  List<Message> getSortedMessagesForRoom(int roomId) {
+    final messages = getMessagesForRoom(roomId);
+    final sorted = List<Message>.from(messages)
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return sorted;
+  }
+
   Future<void> loadMessages(int roomId) async {
     if (_isLoadingMap[roomId] == true) return;
 
@@ -23,6 +31,8 @@ class MessageProvider extends ChangeNotifier {
 
     try {
       final messages = await _repository.getRoomMessages(roomId);
+      // Mesajları sıralama
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       _roomMessages[roomId] = messages;
     } catch (e) {
       _error = e.toString();
@@ -39,7 +49,11 @@ class MessageProvider extends ChangeNotifier {
       if (!_roomMessages.containsKey(roomId)) {
         _roomMessages[roomId] = [];
       }
+
+      // Mesajı ekle ve sırala
       _roomMessages[roomId] = [..._roomMessages[roomId]!, message];
+      _roomMessages[roomId]!.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
       notifyListeners();
     } catch (e) {
       _error = e.toString();
@@ -53,8 +67,20 @@ class MessageProvider extends ChangeNotifier {
     if (!_roomMessages.containsKey(roomId)) {
       _roomMessages[roomId] = [];
     }
-    _roomMessages[roomId] = [..._roomMessages[roomId]!, message];
-    notifyListeners();
+
+    // Mesajın zaten listeye eklenip eklenmediğini kontrol et (duplikeyi önle)
+    final hasMessage = _roomMessages[roomId]!.any((m) =>
+            m.messageId == message.messageId &&
+            m.messageId != -1 // System mesajlarında ID -1 olabilir
+        );
+
+    // Mesaj zaten eklenmişse ekleme
+    if (!hasMessage) {
+      _roomMessages[roomId] = [..._roomMessages[roomId]!, message];
+      // Her ekleme sonrası sırala
+      _roomMessages[roomId]!.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      notifyListeners();
+    }
   }
 
   void clearMessages(int roomId) {
