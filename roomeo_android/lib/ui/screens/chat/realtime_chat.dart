@@ -24,13 +24,14 @@ class RealtimeChat extends StatefulWidget {
 class _RealtimeChatState extends State<RealtimeChat> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
-  late StreamSubscription<MessageEvent> _eventSubscription;
+  StreamSubscription<MessageEvent>? _eventSubscription;
+  Timer? _refreshTimer;
   bool _isInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    // Mesajları yükledikten sonra initialize et
+    // Ekran oluşturulduktan sonra mesajları yükle
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeChat();
     });
@@ -42,29 +43,53 @@ class _RealtimeChatState extends State<RealtimeChat> {
     final messageProvider = context.read<MessageProvider>();
 
     try {
-      // İlk mesajları yükle (MessageProvider içerisinde listenize eklenen notifyListeners() olduğundan emin olun)
-      await messageProvider.loadMessages(widget.roomId);
+      // Tüm mesajları yükle (eskiden olduğu gibi loadMessages yerine loadAllMessages kullan)
+      await messageProvider.loadAllMessages(widget.roomId);
       print(
-          "Initial messages loaded. Count: ${messageProvider.getSortedMessagesForRoom(widget.roomId).length}");
+          "All messages loaded. Count: ${messageProvider.getSortedMessagesForRoom(widget.roomId).length}");
 
-      // Event Bus'tan gelen mesaj eventlerini dinle
+      // Event bus'tan gelen mesaj eventlerini dinle
       final eventBus = MessageEventBus();
       _eventSubscription =
           eventBus.listenForRoom(widget.roomId).listen((event) {
-        print('RealtimeChat: Received event ${event.type}');
+        print(
+            'RealtimeChat: Received event ${event.type} for room ${widget.roomId}');
+
         if (event.type == MessageEventType.received ||
             event.type == MessageEventType.sent) {
-          // Yeni mesaj geldiğinde UI'ın güncellendiğinden emin olmak için (provider notifyListeners() çağrısı varsa Consumer otomatik rebuild olur)
           if (mounted) {
-            _scrollToBottom();
+            // ÖNEMLİ: Her mesaj olayında UI'ı güncelle
+            setState(() {
+              print('RealtimeChat: UI updated for event ${event.type}');
+            });
+
+            // Ve ekranı aşağı kaydır
+            Future.delayed(Duration(milliseconds: 100), () {
+              if (mounted) _scrollToBottom();
+            });
           }
         }
       });
 
-      // İlk yüklemeden sonra da aşağı kaydır
+      // İlk yüklemeden sonra ekranı aşağı kaydır
       if (mounted) {
-        _scrollToBottom();
+        Future.delayed(Duration(milliseconds: 300), () {
+          if (mounted) _scrollToBottom();
+        });
       }
+
+      // YENİ: Periyodik yenileme timer'ı başlat
+      _refreshTimer = Timer.periodic(Duration(seconds: 5), (_) {
+        if (!mounted) return;
+
+        print('RealtimeChat: Auto-refreshing messages');
+        messageProvider.refreshMessages(widget.roomId).then((_) {
+          // Yenilendikten sonra setState çağır
+          if (mounted) {
+            setState(() {});
+          }
+        });
+      });
 
       _isInitialized = true;
     } catch (e) {
@@ -76,7 +101,8 @@ class _RealtimeChatState extends State<RealtimeChat> {
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
-    _eventSubscription.cancel();
+    _eventSubscription?.cancel();
+    _refreshTimer?.cancel();
     super.dispose();
   }
 
@@ -97,6 +123,7 @@ class _RealtimeChatState extends State<RealtimeChat> {
     if (content.isEmpty) return;
 
     try {
+      // Önce metin alanını temizleyelim ki kullanıcı tıklama anında geri bildirim alsın
       _messageController.clear();
 
       // Kullanıcı bilgilerini al
@@ -105,42 +132,39 @@ class _RealtimeChatState extends State<RealtimeChat> {
       int userId = currentUser?.id ?? -1;
       String username = currentUser?.username ?? 'Ben';
 
-      // Yerel mesaj nesnesi oluşturuluyor
-      final localMessage = Message(
-        messageId: -999, // Geçici ID
-        roomId: widget.roomId,
-        userId: userId,
-        username: username,
-        content: content,
-        messageType: 'text',
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
+      // MessageProvider üzerinden mesajı gönder
+      await context.read<MessageProvider>().sendMessage(
+            widget.roomId,
+            content,
+            userId: userId,
+            username: username,
+          );
 
-      // Yerel mesajı event bus üzerinden yayınla (MessageProvider'ın _addMessageToRoom() çağırıp notifyListeners yapması gerekiyor)
-      final eventBus = MessageEventBus();
-      eventBus.publish(MessageEvent(
-        type: MessageEventType.sent,
-        roomId: widget.roomId,
-        message: localMessage,
-      ));
-      print("Local message published via event bus");
-
-      // MessageProvider üzerinden mesajı gönder (bu işlem içinde provider listeneleri güncellemeli)
-      await context.read<MessageProvider>().sendMessage(widget.roomId, content);
       print("sendMessage() completed");
 
+      // Ekranı hemen güncelle
       if (mounted) {
-        _scrollToBottom();
+        setState(() {
+          print('UI updated after sending message');
+        });
+      }
+
+      // Ekranı aşağı kaydır
+      if (mounted) {
+        Future.delayed(Duration(milliseconds: 50), () {
+          _scrollToBottom();
+        });
       }
     } catch (e) {
       print('Error sending message: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Mesaj gönderilemedi: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Mesaj gönderilemedi: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 

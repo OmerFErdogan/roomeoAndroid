@@ -2,7 +2,7 @@
 import 'dart:async';
 import '../../data/models/message.dart';
 
-// Mesaj olayı türleri
+// Message event types
 enum MessageEventType {
   received,
   sent,
@@ -12,7 +12,7 @@ enum MessageEventType {
   roomUpdated
 }
 
-// Mesaj olayı veri sınıfı
+// Message event data class
 class MessageEvent {
   final MessageEventType type;
   final int roomId;
@@ -27,40 +27,45 @@ class MessageEvent {
   });
 }
 
-// Singleton Event Bus sınıfı
+// Singleton Event Bus class
 class MessageEventBus {
   // Singleton instance
   static final MessageEventBus _instance = MessageEventBus._internal();
   factory MessageEventBus() => _instance;
   MessageEventBus._internal();
 
-  // Broadcast özellikli StreamController, birden fazla dinleyicinin olması için
+  // Broadcast StreamController for multiple listeners
   final _eventController = StreamController<MessageEvent>.broadcast();
 
-  // Event Stream'ini al
+  // Get event stream
   Stream<MessageEvent> get eventStream => _eventController.stream;
 
-  // Yeni bir mesaj olayı yayınla
+  // Publish a new message event
   void publish(MessageEvent event) {
     if (!_eventController.isClosed) {
       print(
           'MessageEventBus: Publishing event ${event.type} for room ${event.roomId}');
       _eventController.sink.add(event);
+    } else {
+      print(
+          'Warning: Attempted to publish event ${event.type} after event bus was closed');
     }
   }
 
-  // Belirli bir oda için mesaj eventi dinle
+  // Listen for events for a specific room
   Stream<MessageEvent> listenForRoom(int roomId) {
     return eventStream.where((event) => event.roomId == roomId);
   }
 
-  // Belirli tipteki eventleri dinle
+  // Listen for specific event types
   Stream<MessageEvent> listenForType(MessageEventType type) {
     return eventStream.where((event) => event.type == type);
   }
 
-  // Kaynakları temizle
+  // Cleanup resources
   void dispose() {
-    _eventController.close();
+    if (!_eventController.isClosed) {
+      _eventController.close();
+    }
   }
 }

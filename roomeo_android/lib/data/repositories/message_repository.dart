@@ -45,28 +45,55 @@ class MessageRepository {
     }
   }
 
+  // lib/data/repositories/message_repository.dart içindeki sendMessage fonksiyonunu düzeltelim
+
   Future<Message> sendMessage(int roomId, String content) async {
     try {
       print('Sending message to room $roomId: $content');
 
+      // YENİ: Hataları daha iyi takip etmek için request detayını yazdır
+      print(
+          'Request details: POST /rooms/$roomId/messages - Content: $content');
+
       final response = await _dio.post(
         '/rooms/$roomId/messages',
-        data: {
-          'content': content,
-          'message_type': 'text' // Şimdilik sadece text mesajları
-        },
+        data: {'content': content, 'message_type': 'text'},
+        // YENİ: Timeout süresini uzatalım
+        options: Options(
+          sendTimeout: Duration(seconds: 10),
+          receiveTimeout: Duration(seconds: 10),
+        ),
       );
 
-      print('Message send response: ${response.data}'); // Debug log
+      print('Message send response: ${response.data}');
+      print('Response status code: ${response.statusCode}');
 
       if (response.statusCode == 201 || response.statusCode == 200) {
         try {
-          return Message.fromJson(response.data);
+          // YENİ: Sunucudan dönen veriyi daha detaylı işle
+          if (response.data is Map<String, dynamic>) {
+            return Message.fromJson(response.data);
+          } else {
+            print('Response is not a Map: ${response.data.runtimeType}');
+            print('Response content: ${response.data}');
+
+            // Geçici bir mesaj döndür
+            return Message(
+              messageId: -1,
+              roomId: roomId,
+              userId: -1,
+              username: 'Sistem',
+              content: content,
+              messageType: 'text',
+              createdAt: DateTime.now(),
+              updatedAt: DateTime.now(),
+            );
+          }
         } catch (parseError) {
           print('Error parsing message response: $parseError');
           print('Response data: ${response.data}');
 
-          // Manuel olarak oluştur
+          // Manuel olarak mesaj oluştur
           return Message(
             messageId: -1,
             roomId: roomId,
@@ -80,10 +107,15 @@ class MessageRepository {
         }
       }
 
-      throw NetworkException('Failed to send message');
+      throw NetworkException(
+          'Failed to send message: Unexpected status code ${response.statusCode}');
     } on DioException catch (e) {
       print('Dio error sending message: ${e.message}');
       print('Response data: ${e.response?.data}');
+      print('Request that caused the error: ${e.requestOptions.uri}');
+      print('Request method: ${e.requestOptions.method}');
+      print('Request headers: ${e.requestOptions.headers}');
+      print('Request data: ${e.requestOptions.data}');
 
       if (e.response?.statusCode == 401) {
         throw AuthException('Unauthorized access');
@@ -93,7 +125,7 @@ class MessageRepository {
         throw NotFoundException('Room not found');
       }
       throw NetworkException(
-        e.response?.data?['error'] ?? 'Failed to send message',
+        e.response?.data?['error'] ?? 'Failed to send message: ${e.message}',
       );
     } catch (e) {
       print('Unexpected error sending message: $e');

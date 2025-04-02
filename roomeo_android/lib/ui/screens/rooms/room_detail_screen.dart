@@ -34,6 +34,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   Timer? _autoRefreshTimer;
   bool _isExiting = false;
   bool _isLoading = false;
+  bool _isDisposed = false;
   StreamSubscription<MessageEvent>? _eventSubscription;
 
   @override
@@ -43,35 +44,36 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
 
     // İlk yüklemede odaya giriş yap
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeRoom();
+      if (!_isDisposed) {
+        _initializeRoom();
+      }
     });
 
     // Event Bus'ı dinle - sadece katılımcı güncellemeleri için
     final eventBus = MessageEventBus();
     _eventSubscription =
         eventBus.listenForRoom(widget.room.roomId).listen((event) {
-      if (mounted) {
+      if (mounted && !_isDisposed) {
         // Katılımcı güncellemesi gerektiğinde
         if (event.type == MessageEventType.userJoined ||
             event.type == MessageEventType.userLeft ||
             event.type == MessageEventType.roomUpdated) {
           _refreshRoomData();
         }
-
-        // NOT: Mesaj olaylarıyla ilgili işlemler RealtimeChat widget'ında yapılıyor!
-        // Mesaj scroll işlemlerini burada yapmıyoruz.
       }
     });
 
     // Periyodik olarak oda bilgilerini güncelle (özellikle katılımcı sayısı için)
     _autoRefreshTimer = Timer.periodic(Duration(seconds: 30), (_) {
-      if (mounted) {
+      if (mounted && !_isDisposed) {
         _refreshRoomData();
       }
     });
   }
 
   Future<void> _initializeRoom() async {
+    if (_isDisposed) return;
+
     setState(() {
       _isLoading = true;
     });
@@ -80,10 +82,13 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
       // Odaya giriş yap
       await context.read<RoomProvider>().enterRoom(widget.room.roomId);
 
-      // Mesajları yükle
-      await context.read<MessageProvider>().loadMessages(widget.room.roomId);
+      // Sayfa hala aktif mi kontrol et
+      if (_isDisposed) return;
+
+      // Mesaj yükleme işlemini doğrudan RoomDetailScreen'de yapma
+      // Bunu RealtimeChat bileşeni yapacak
     } catch (e) {
-      if (mounted) {
+      if (mounted && !_isDisposed) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Odaya bağlanırken hata oluştu: $e'),
@@ -92,7 +97,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
         );
       }
     } finally {
-      if (mounted) {
+      if (mounted && !_isDisposed) {
         setState(() {
           _isLoading = false;
         });
@@ -101,6 +106,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   Future<void> _refreshRoomData() async {
+    if (_isDisposed) return;
+
     try {
       // Katılımcı listesini güncelle
       await context
@@ -113,6 +120,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
 
   @override
   void dispose() {
+    _isDisposed = true; // İlk önce _isDisposed'u true yap
     _tabController.dispose();
     _autoRefreshTimer?.cancel();
     _eventSubscription?.cancel();
@@ -378,6 +386,12 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
           );
         }
 
+        // Aktif ve çıkış yapmış kullanıcıları ayır
+        final activeParticipants =
+            participants.where((p) => p.isActive).toList();
+        final inactiveParticipants =
+            participants.where((p) => !p.isActive).toList();
+
         return Padding(
           padding: EdgeInsets.all(16),
           child: Column(
@@ -387,22 +401,99 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
                 'Oda Katılımcıları (${participants.length})',
                 style: ModernTheme.titleStyle.copyWith(fontSize: 18),
               ),
-              SizedBox(height: 16),
-              Expanded(
-                child: GridView.builder(
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    mainAxisSpacing: 16,
-                    crossAxisSpacing: 16,
-                    childAspectRatio: 0.85,
+              SizedBox(height: 8),
+              if (activeParticipants.isNotEmpty) ...[
+                // Aktif katılımcılar başlığı
+                Padding(
+                  padding: const EdgeInsets.only(top: 16, bottom: 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: Colors.green,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        'Aktif Katılımcılar (${activeParticipants.length})',
+                        style: ModernTheme.subheadingStyle.copyWith(
+                          fontSize: 16,
+                          color: ModernTheme.textSecondary,
+                        ),
+                      ),
+                    ],
                   ),
-                  itemCount: participants.length,
-                  itemBuilder: (context, index) {
-                    final participant = participants[index];
-                    return _buildParticipantItem(participant);
-                  },
                 ),
-              ),
+                // Aktif katılımcılar grid
+                Expanded(
+                  flex: activeParticipants.length > 0 ? 2 : 0,
+                  child: GridView.builder(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      mainAxisSpacing: 16,
+                      crossAxisSpacing: 16,
+                      childAspectRatio: 0.85,
+                    ),
+                    itemCount: activeParticipants.length,
+                    shrinkWrap: inactiveParticipants.isNotEmpty,
+                    physics: inactiveParticipants.isNotEmpty
+                        ? NeverScrollableScrollPhysics()
+                        : null,
+                    itemBuilder: (context, index) {
+                      return _buildParticipantItem(activeParticipants[index]);
+                    },
+                  ),
+                ),
+              ],
+              if (inactiveParticipants.isNotEmpty) ...[
+                // Çıkış yapmış katılımcılar başlığı
+                Padding(
+                  padding: const EdgeInsets.only(top: 16, bottom: 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: Colors.grey,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        'Çıkış Yapmış Katılımcılar (${inactiveParticipants.length})',
+                        style: ModernTheme.subheadingStyle.copyWith(
+                          fontSize: 16,
+                          color: ModernTheme.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Çıkış yapmış katılımcılar grid
+                Expanded(
+                  flex: activeParticipants.isEmpty ? 1 : 1,
+                  child: GridView.builder(
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      mainAxisSpacing: 16,
+                      crossAxisSpacing: 16,
+                      childAspectRatio: 0.85,
+                    ),
+                    itemCount: inactiveParticipants.length,
+                    shrinkWrap: activeParticipants.isNotEmpty,
+                    physics: activeParticipants.isNotEmpty
+                        ? NeverScrollableScrollPhysics()
+                        : null,
+                    itemBuilder: (context, index) {
+                      return _buildParticipantItem(inactiveParticipants[index]);
+                    },
+                  ),
+                ),
+              ],
             ],
           ),
         );
@@ -417,85 +508,133 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     // Rol için renk belirle
     final Color roleColor = _getRoleColor(participant.role);
 
+    // Aktif/Çıkış yapmış kullanıcı için farklı stiller
+    final bool isActive = participant.isActive;
+    final containerColor = isActive
+        ? (isCurrentUser ? ModernTheme.primary.withOpacity(0.05) : Colors.white)
+        : Colors.grey[100]; // Çıkış yapmış kullanıcılar için gri arka plan
+
+    final opacity =
+        isActive ? 1.0 : 0.6; // Çıkış yapmış kullanıcılar için hafif soluk
+    final borderColor = isActive
+        ? (isCurrentUser ? ModernTheme.primary : ModernTheme.borderColor)
+        : Colors.grey[300]!;
+
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: containerColor,
         borderRadius: BorderRadius.circular(ModernTheme.borderRadius),
-        boxShadow:
-            isCurrentUser ? ModernTheme.defaultShadow : ModernTheme.lightShadow,
-        border: isCurrentUser
-            ? Border.all(color: ModernTheme.primary, width: 2)
-            : null,
+        boxShadow: isActive
+            ? (isCurrentUser
+                ? ModernTheme.defaultShadow
+                : ModernTheme.lightShadow)
+            : null, // Çıkış yapan kullanıcılar için gölge yok
+        border:
+            Border.all(color: borderColor, width: isCurrentUser ? 1.5 : 1.0),
       ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Stack(
-            alignment: Alignment.center,
-            children: [
-              // Avatar
-              Container(
-                width: 60,
-                height: 60,
-                decoration: BoxDecoration(
-                  color: ModernTheme.primary.withOpacity(0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: Text(
-                    participant.username[0].toUpperCase(),
-                    style: TextStyle(
-                      color: ModernTheme.primary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 24,
+      child: Opacity(
+        opacity: opacity,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                // Avatar
+                Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    color: ModernTheme.primary.withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: Text(
+                      participant.username[0].toUpperCase(),
+                      style: TextStyle(
+                        color: ModernTheme.primary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 24,
+                      ),
                     ),
                   ),
                 ),
-              ),
 
-              // Rol göstergesi
-              Positioned(
-                bottom: 0,
-                right: 0,
-                child: Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: roleColor,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 2),
+                // Aktif/Çıkış durumu göstergesi
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: isActive ? Colors.green : Colors.grey,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-          SizedBox(height: 8),
-          Text(
-            participant.username,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              fontSize: 14,
+
+                // Rol göstergesi
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: Container(
+                    width: 18,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      color: roleColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          SizedBox(height: 2),
-          Container(
-            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            decoration: BoxDecoration(
-              color: roleColor.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              _formatRole(participant.role),
+            SizedBox(height: 8),
+            Text(
+              participant.username,
               style: TextStyle(
-                fontSize: 10,
-                color: roleColor,
-                fontWeight: FontWeight.w500,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            SizedBox(height: 2),
+            Container(
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: roleColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatRole(participant.role),
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: roleColor,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (!isActive) ...[
+                    SizedBox(width: 4),
+                    Text(
+                      "• Çıktı",
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.grey,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

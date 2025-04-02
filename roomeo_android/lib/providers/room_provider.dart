@@ -22,6 +22,7 @@ class RoomProvider extends ChangeNotifier {
   Map<int, WebSocketChannel?> _roomWebSockets = {};
   Map<int, bool> _roomConnectionStatus = {}; // Her oda için bağlantı durumu
   Map<int, Timer?> _pingTimers = {}; // Her oda için ping timer
+  Map<int, Timer?> _refreshTimers = {}; // Her oda için yenileme timer'ı
   Map<int, int> _reconnectAttempts = {}; // Yeniden bağlanma denemesi sayısı
   Map<int, DateTime> _lastMessageTime = {}; // Son mesaj zaman damgası
   bool _isLoading = false;
@@ -75,15 +76,21 @@ class RoomProvider extends ChangeNotifier {
 
   Future<List<RoomParticipant>> fetchRoomParticipants(int roomId) async {
     try {
+      // YENİ: Hem aktif hem de çıkmış kullanıcıları alıyoruz
       final participants = await _repository.getActiveParticipants(roomId);
       _roomParticipants[roomId] = participants;
       print('Fetched ${participants.length} participants for room $roomId');
+
+      // Aktif katılımcıların sayısını kontrol et
+      final activeCount = participants.where((p) => p.isActive).length;
+      print(
+          'Active participants: $activeCount, Inactive: ${participants.length - activeCount}');
 
       // Oda bilgisini güncelle
       final index = _userRooms.indexWhere((room) => room.roomId == roomId);
       if (index != -1) {
         _userRooms[index] = _userRooms[index].copyWith(
-          currentParticipants: participants.length,
+          currentParticipants: activeCount, // Sadece aktif olanları say
           participants: participants,
         );
 
@@ -115,14 +122,15 @@ class RoomProvider extends ChangeNotifier {
 
       // Katılımcıları güncelle ve aktif odayı ayarla
       final participants = await fetchRoomParticipants(roomId);
+      final activeParticipants = participants.where((p) => p.isActive).length;
       print(
-          'Room $roomId has ${participants.length} participants after entering');
+          'Room $roomId has $activeParticipants active participants after entering');
 
       // Oda bilgilerini güncelle
       final index = _userRooms.indexWhere((room) => room.roomId == roomId);
       if (index != -1) {
         _activeRoom = _userRooms[index].copyWith(
-          currentParticipants: participants.length,
+          currentParticipants: activeParticipants,
           participants: participants,
         );
         _userRooms[index] = _activeRoom!;
@@ -268,7 +276,8 @@ class RoomProvider extends ChangeNotifier {
 
       // Ping timer'ı başlat - bağlantıyı aktif tutmak için
       _pingTimers[roomId]?.cancel(); // Önceki timer varsa iptal et
-      _pingTimers[roomId] = Timer.periodic(Duration(seconds: 30), (_) {
+      _pingTimers[roomId] = Timer.periodic(Duration(seconds: 20), (_) {
+        // 30 saniyeden 20 saniyeye düşürdük
         if (_roomConnectionStatus[roomId] == true) {
           print('Sending ping to room $roomId');
           try {
@@ -281,57 +290,19 @@ class RoomProvider extends ChangeNotifier {
         }
       });
 
+      // YENİ: Periyodik katılımcı güncellemesi için timer ekle
+      _refreshTimers[roomId]?.cancel();
+      _refreshTimers[roomId] = Timer.periodic(Duration(seconds: 10), (_) {
+        if (_roomConnectionStatus[roomId] == true) {
+          fetchRoomParticipants(roomId);
+        }
+      });
+
       // Bağlantı açıldığında katılımcı listesini güncelle
       fetchRoomParticipants(roomId);
 
-      channel.stream.listen(
-        (data) {
-          print('WebSocket data received for room $roomId: $data');
-
-          // Son mesaj zaman damgasını güncelle
-          _lastMessageTime[roomId] = DateTime.now();
-
-          if (data is String) {
-            if (data.contains('pong')) {
-              // Pong yanıtını işle
-              _roomConnectionStatus[roomId] = true;
-              print('Received pong from room $roomId');
-              return;
-            }
-
-            // System mesajları için özel işleme
-            if (data.contains('joined the room') ||
-                data.contains('left the room')) {
-              print('Room activity detected: $data');
-              // Katılımcı listesini hemen güncelle
-              fetchRoomParticipants(roomId);
-
-              // Mesaj balonları oluşturmadan sadece katılımcı sayısını güncelle
-              _updateRoomParticipantCount(roomId);
-              return;
-            }
-
-            try {
-              final message = jsonDecode(data);
-              _handleWebSocketMessage(roomId, message);
-            } catch (e) {
-              print('Error processing WebSocket message: $e');
-              print('Raw message: $data');
-            }
-          }
-        },
-        onError: (error) {
-          print('WebSocket Error for room $roomId: $error');
-          _roomConnectionStatus[roomId] = false;
-          _reconnectWebSocket(roomId);
-        },
-        onDone: () {
-          print('WebSocket connection closed for room $roomId');
-          _roomConnectionStatus[roomId] = false;
-          _reconnectWebSocket(roomId);
-        },
-        cancelOnError: false, // Hata olsa bile dinlemeye devam et
-      );
+      // Stream dinleme
+      _listenToWebSocketStream(roomId, channel);
 
       print('WebSocket connection established for room $roomId');
     } catch (e) {
@@ -342,10 +313,131 @@ class RoomProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  //  Stream dinleme mantığını ayrı bir metoda çıkardık
+  void _listenToWebSocketStream(int roomId, WebSocketChannel channel) {
+    channel.stream.listen(
+      (data) {
+        print('WebSocket data received for room $roomId: $data');
+
+        // Son mesaj zaman damgasını güncelle
+        _lastMessageTime[roomId] = DateTime.now();
+
+        if (data is String) {
+          // Pong yanıtı gelirse bağlantı durumunu güncelle
+          if (data.contains('pong')) {
+            _roomConnectionStatus[roomId] = true;
+            print('Received pong from room $roomId');
+            return;
+          }
+
+          // Katılımcı değişiklikleri
+          if (data.contains('joined the room')) {
+            print('User joined room $roomId: $data');
+
+            // Kullanıcı adını çıkar
+            final username = data.split(' ')[0];
+            print('Username that joined: $username');
+
+            // Katılımcı listesini hemen güncelle
+            fetchRoomParticipants(roomId);
+
+            // EventBus'a katılma olayını yayınla
+            final eventBus = MessageEventBus();
+            eventBus.publish(MessageEvent(
+              type: MessageEventType.userJoined,
+              roomId: roomId,
+              data: data,
+            ));
+            return;
+          }
+
+          if (data.contains('left the room')) {
+            print('User left room $roomId: $data');
+
+            // Kullanıcı adını çıkar
+            final username = data.split(' ')[0];
+            print('Username that left: $username');
+
+            // Önemli: Kullanıcı çıktığında, katılımcı durumlarının güncellenmesi için biraz bekle
+            Future.delayed(Duration(milliseconds: 500), () {
+              // Zorla güncelleme yap
+              fetchRoomParticipants(roomId).then((_) {
+                // UI'ı yenile
+                notifyListeners();
+              });
+            });
+
+            // Ayrılma olayını yayınla
+            final eventBus = MessageEventBus();
+            eventBus.publish(MessageEvent(
+              type: MessageEventType.userLeft,
+              roomId: roomId,
+              data: data,
+            ));
+            return;
+          }
+
+          // JSON mesajı decode et ve işle
+          try {
+            // JSON mesajı olup olmadığını kontrol et
+            if (data.trim().startsWith('{') && data.trim().endsWith('}')) {
+              final message = jsonDecode(data);
+
+              // Mesaj JSON'sa, mesaj olayını işle
+              _handleWebSocketMessage(roomId, message);
+
+              // YENİ: Mesaj içeriği varsa, doğrudan EventBus'a da yayınla
+              // Bu şekilde mesajın hızlı bir şekilde diğer kullanıcılara ulaşmasını sağlıyoruz
+              if (message is Map<String, dynamic> &&
+                  message['content'] != null) {
+                try {
+                  final messageObj = Message.fromJson(message);
+                  final eventBus = MessageEventBus();
+
+                  // Aynı mesajı farklı bir tür olarak yayınla (yedek olarak)
+                  eventBus.publish(MessageEvent(
+                    type: MessageEventType.received,
+                    roomId: roomId,
+                    message: messageObj,
+                  ));
+
+                  print(
+                      'WebSocket message directly published to EventBus: ${messageObj.content}');
+                } catch (e) {
+                  print('Error converting message for direct publishing: $e');
+                }
+              }
+            } else if (data.contains('message')) {
+              // Basit mesaj içeriği kontrolü
+              print('Possible message detected in non-JSON format: $data');
+              // Burada basit string mesajları da işleyebilirsiniz
+            }
+          } catch (e) {
+            print('Error processing WebSocket message: $e');
+            print('Raw message: $data');
+          }
+        }
+      },
+      onError: (error) {
+        print('WebSocket Error for room $roomId: $error');
+        _roomConnectionStatus[roomId] = false;
+        _reconnectWebSocket(roomId);
+      },
+      onDone: () {
+        print('WebSocket connection closed for room $roomId');
+        _roomConnectionStatus[roomId] = false;
+        _reconnectWebSocket(roomId);
+      },
+      cancelOnError: false, // Hata olsa bile dinlemeye devam et
+    );
+  }
+
   Future<void> _disconnectFromRoomWebSocket(int roomId) async {
     print('Disconnecting WebSocket for room $roomId');
     _pingTimers[roomId]?.cancel();
     _pingTimers.remove(roomId);
+    _refreshTimers[roomId]?.cancel();
+    _refreshTimers.remove(roomId);
     _reconnectAttempts.remove(roomId);
 
     final ws = _roomWebSockets[roomId];
@@ -365,116 +457,58 @@ class RoomProvider extends ChangeNotifier {
     print('WebSocket data received for room $roomId: $data');
     final eventBus = MessageEventBus();
 
-    if (data is String) {
-      // Katılma/ayrılma mesajlarını özel olarak işle
-      if (data.contains('joined the room')) {
-        print('User joined room $roomId: $data');
-
-        // Sadece katılımcı listesini güncelle, mesaj oluşturma
+    if (data is Map<String, dynamic>) {
+      if (data['type'] == 'participants_update') {
+        print('Participants update received for room $roomId');
+        // Katılımcı listesi güncellemesi
         fetchRoomParticipants(roomId);
-        _updateRoomParticipantCount(roomId);
 
-        // Katılma olayını yayınla
         eventBus.publish(MessageEvent(
-          type: MessageEventType.userJoined,
+          type: MessageEventType.roomUpdated,
           roomId: roomId,
           data: data,
         ));
+      } else {
+        try {
+          // Message nesnesine dönüştür
+          final message = Message.fromJson(data);
 
-        return;
-      }
+          // Join/Leave mesajlarını filtreleme
+          if (message.messageType == 'system' &&
+              (message.content.contains('joined the room') ||
+                  message.content.contains('left the room'))) {
+            print('System message filtered: ${message.content}');
+            return;
+          }
 
-      if (data.contains('left the room')) {
-        print('User left room $roomId: $data');
-
-        // Sadece katılımcı listesini güncelle, mesaj oluşturma
-        fetchRoomParticipants(roomId);
-        _updateRoomParticipantCount(roomId);
-
-        // Ayrılma olayını yayınla
-        eventBus.publish(MessageEvent(
-          type: MessageEventType.userLeft,
-          roomId: roomId,
-          data: data,
-        ));
-
-        return;
-      }
-
-      // Ping/Pong mesajlarını işle
-      if (data.contains('pong')) {
-        _roomConnectionStatus[roomId] = true;
-        return;
-      }
-
-      // JSON mesajları parse et
-      try {
-        final message = jsonDecode(data);
-        if (message is Map<String, dynamic>) {
-          _processMessageData(roomId, message);
+          // Diğer tüm mesajları yayınla
+          print('Publishing normal message event: ${message.content}');
+          eventBus.publish(MessageEvent(
+            type: MessageEventType.received,
+            roomId: roomId,
+            message: message,
+          ));
+        } catch (e) {
+          print('Error processing message data: $e');
+          print('Raw data: $data');
         }
-      } catch (e) {
-        print('Error parsing WebSocket message: $e');
-        print('Raw message: $data');
-      }
-    } else if (data is Map<String, dynamic>) {
-      _processMessageData(roomId, data);
-    }
-  }
-
-  void _processMessageData(int roomId, Map<String, dynamic> data) {
-    final eventBus = MessageEventBus();
-
-    if (data['type'] == 'participants_update') {
-      print('Participants update received for room $roomId');
-      // Katılımcı listesi güncellemesi
-      fetchRoomParticipants(roomId);
-      _updateRoomParticipantCount(roomId);
-
-      eventBus.publish(MessageEvent(
-        type: MessageEventType.roomUpdated,
-        roomId: roomId,
-        data: data,
-      ));
-    } else {
-      try {
-        // Message nesnesine dönüştür
-        final message = Message.fromJson(data);
-
-        // Join/Leave mesajlarını filtreleme
-        if (message.messageType == 'system' &&
-            (message.content.contains('joined the room') ||
-                message.content.contains('left the room'))) {
-          print('System message filtered: ${message.content}');
-          return;
-        }
-
-        // Diğer tüm mesajları yayınla
-        print('Publishing normal message event: ${message.content}');
-        eventBus.publish(MessageEvent(
-          type: MessageEventType.received,
-          roomId: roomId,
-          message: message,
-        ));
-      } catch (e) {
-        print('Error processing message data: $e');
-        print('Raw data: $data');
       }
     }
   }
 
-  // Yeni eklenen metod - oda katılımcı sayısını günceller
+  // Oda katılımcı sayısını günceller
   Future<void> _updateRoomParticipantCount(int roomId) async {
     try {
       print('Updating participant count for room $roomId');
       final participants = await _repository.getActiveParticipants(roomId);
+      final activeParticipants = participants.where((p) => p.isActive).length;
 
       // Odayı kullanıcının odaları arasında bul
       final index = _userRooms.indexWhere((room) => room.roomId == roomId);
       if (index != -1) {
         // Oda bulundu, katılımcı sayısını güncelle
         _userRooms[index] = _userRooms[index].copyWith(
-          currentParticipants: participants.length,
+          currentParticipants: activeParticipants,
           participants: participants,
         );
 
@@ -545,8 +579,9 @@ class RoomProvider extends ChangeNotifier {
       for (var room in rooms) {
         final participants =
             await _repository.getActiveParticipants(room.roomId);
+        final activeParticipants = participants.where((p) => p.isActive).length;
         room = room.copyWith(
-          currentParticipants: participants.length,
+          currentParticipants: activeParticipants,
           participants: participants,
         );
       }
