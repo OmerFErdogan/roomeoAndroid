@@ -133,6 +133,78 @@ class MessageRepository {
     }
   }
 
+  Future<Message> sendMessageWithClientId(
+      int roomId, String content, String clientId) async {
+    try {
+      print('Sending message to room $roomId with clientId: $clientId');
+
+      // Use the Dio instance to send the message with clientId
+      final response = await _dio.post(
+        '/rooms/$roomId/messages',
+        data: {
+          'content': content,
+          'message_type': 'text',
+          'client_id': clientId, // Send clientId to server
+        },
+        options: Options(
+          sendTimeout: Duration(seconds: 10),
+          receiveTimeout: Duration(seconds: 10),
+        ),
+      );
+
+      print('Message send response: ${response.data}');
+      print('Response status code: ${response.statusCode}');
+
+      if (response.statusCode == 201 || response.statusCode == 200) {
+        try {
+          // Process server response
+          if (response.data is Map<String, dynamic>) {
+            // Add clientId to response data if it's not already there
+            Map<String, dynamic> messageData = response.data;
+            messageData['client_id'] = clientId;
+
+            return Message.fromJson(messageData);
+          } else {
+            print('Response is not a Map: ${response.data.runtimeType}');
+
+            // Return fallback message with clientId
+            return Message(
+              messageId: -1,
+              roomId: roomId,
+              userId: -1,
+              username: 'Sistem',
+              content: content,
+              messageType: 'text',
+              createdAt: DateTime.now(),
+              updatedAt: DateTime.now(),
+              clientId: clientId,
+            );
+          }
+        } catch (parseError) {
+          print('Error parsing message response: $parseError');
+
+          // Return fallback message with clientId
+          return Message(
+            messageId: -1,
+            roomId: roomId,
+            userId: -1,
+            username: 'Sistem',
+            content: content,
+            messageType: 'text',
+            createdAt: DateTime.now(),
+            updatedAt: DateTime.now(),
+            clientId: clientId,
+          );
+        }
+      }
+
+      throw NetworkException('Failed to send message with client ID');
+    } catch (e) {
+      print('Error sending message with clientId: $e');
+      rethrow;
+    }
+  }
+
   Future<void> deleteMessage(int roomId, int messageId) async {
     try {
       final response = await _dio.delete(

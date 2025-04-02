@@ -107,8 +107,9 @@ class ModernMessageBubble extends StatelessWidget {
             ),
             SizedBox(height: 4),
           ],
+          // Client ID işaretlerini temizleyerek mesaj içeriğini göster
           Text(
-            message.content,
+            _cleanMessageContent(message.content),
             style: TextStyle(
               color: isCurrentUser ? Colors.white : ModernTheme.textPrimary,
               fontSize: 15,
@@ -168,5 +169,13 @@ class ModernMessageBubble extends StatelessWidget {
   String _formatTime(DateTime dateTime) {
     final localTime = dateTime.toLocal();
     return '${localTime.hour.toString().padLeft(2, '0')}:${localTime.minute.toString().padLeft(2, '0')}';
+  }
+
+  // Client ID işaretlerini mesaj içeriğinden temizleyen yardımcı metod
+  String _cleanMessageContent(String content) {
+    if (content.contains('__CLIENT_ID:')) {
+      return content.replaceAll(RegExp(r'__CLIENT_ID:[a-f0-9-]+__'), '').trim();
+    }
+    return content;
   }
 }

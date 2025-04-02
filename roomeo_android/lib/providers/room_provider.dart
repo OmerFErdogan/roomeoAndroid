@@ -298,7 +298,7 @@ class RoomProvider extends ChangeNotifier {
         }
       });
 
-      // Bağlantı açıldığında katılımcı listesini güncelle
+      // Bağlantısı açıldığında katılımcı listesini güncelle
       fetchRoomParticipants(roomId);
 
       // Stream dinleme
@@ -555,7 +555,7 @@ class RoomProvider extends ChangeNotifier {
       try {
         await _connectToRoomWebSocket(roomId);
         if (_roomConnectionStatus[roomId] == true) {
-          // Bağlantı başarılı oldu, deneme sayısını sıfırla
+          // Bağlantısı başarılı oldu, deneme sayısını sıfırla
           _reconnectAttempts[roomId] = 0;
           print('Successfully reconnected to room $roomId');
         }
@@ -621,38 +621,97 @@ class RoomProvider extends ChangeNotifier {
     }
   }
 
-  // WebSocket bağlantı durumunu periyodik olarak kontrol et
-  void startConnectionHealthCheck() {
-    Timer.periodic(Duration(minutes: 1), (timer) {
-      _roomWebSockets.keys.forEach((roomId) {
-        // Son mesaj alımından beri geçen süreyi kontrol et
-        final lastMessageTime = _lastMessageTime[roomId] ??
-            DateTime.now().subtract(Duration(minutes: 5));
-        final timeElapsed = DateTime.now().difference(lastMessageTime);
+  // WebSocket bağlantısı durumunu periyodik olarak kontrol et
+  Future<void> startConnectionHealthCheck() async {
+    print('Starting connection health check for all rooms');
 
-        // 3 dakikadan fazla mesaj gelmemişse ve bağlantı açık görünüyorsa, ping gönder
-        if (timeElapsed.inMinutes > 3 &&
-            (_roomConnectionStatus[roomId] ?? false)) {
-          print(
-              'No messages received for room $roomId in ${timeElapsed.inMinutes} minutes. Sending health check ping.');
-          try {
-            _roomWebSockets[roomId]?.sink.add(jsonEncode({'type': 'ping'}));
-          } catch (e) {
-            print('Error during health check for room $roomId: $e');
-            _roomConnectionStatus[roomId] = false;
-            _reconnectWebSocket(roomId);
+    // Periyodik olarak tüm odaların bağlantısı durumunu kontrol et
+    Timer.periodic(Duration(seconds: 30), (timer) async {
+      for (final roomId in _roomWebSockets.keys.toList()) {
+        // WebSocket bağlantısı açık mı kontrol et
+        final isConnected = _roomConnectionStatus[roomId] ?? false;
+
+        if (!isConnected) {
+          print('Room $roomId has disconnected WebSocket, attempting to reconnect');
+          await _reconnectWebSocket(roomId);
+        } else {
+          // Bağlantı varsa, son aktivite zamanını kontrol et
+          final lastActive = _lastMessageTime[roomId] ?? DateTime.now().subtract(Duration(minutes: 10));
+          final timeSinceLastActivity = DateTime.now().difference(lastActive);
+
+          // 5 dakikadan uzun süredir aktif değilse, kullanıcıyı odadan çıkar
+          if (timeSinceLastActivity.inMinutes > 5) {
+            print('No activity in room $roomId for ${timeSinceLastActivity.inMinutes} minutes, updating status');
+            // Odadan çıkıp tekrar gir - bu sunucuya aktif katılımcıları güncellemeye zorlar
+            await refreshRoomParticipants(roomId);
           }
         }
-      });
+      }
     });
+  }
+
+  // Katılımcı durumlarını zorla güncelle
+  Future<void> refreshRoomParticipants(int roomId) async {
+    try {
+      print('Force refreshing participants for room $roomId');
+
+      // Sunucuya özel istek gönder - katılımcı durumunu güncelle
+      await _repository.refreshRoomParticipants(roomId);
+
+      // Güncellenen katılımcı listesini al
+      await fetchRoomParticipants(roomId);
+
+      print('Room participants forcefully refreshed');
+    } catch (e) {
+      print('Error refreshing room participants: $e');
+    }
+  }
+
+  // Uygulama kapatılırken çağrılacak
+  Future<void> markUserAsInactive() async {
+    try {
+      // Aktif oda varsa
+      if (_activeRoom != null) {
+        final roomId = _activeRoom!.roomId;
+        print('Marking user as inactive for room $roomId');
+
+        // Odadan çık işlemi - WebSocket bağlantısı da kapatılacak
+        await exitRoom(roomId);
+      }
+
+      // Tüm WebSocket bağlantılarını kapat
+      for (final roomId in _roomWebSockets.keys.toList()) {
+        await _disconnectFromRoomWebSocket(roomId);
+      }
+    } catch (e) {
+      print('Error marking user as inactive: $e');
+    }
   }
 
   @override
   void dispose() {
-    // Tüm WebSocket bağlantılarını ve timer'ları kapat
-    for (var roomId in _roomWebSockets.keys) {
-      _disconnectFromRoomWebSocket(roomId);
+    print('Disposing RoomProvider');
+
+    // Aktif kullanıcıyı inaktif olarak işaretle - çok önemli
+    markUserAsInactive();
+
+    // Tüm timer'ları iptal et
+    for (var timer in _pingTimers.values) {
+      timer?.cancel();
     }
+    for (var timer in _refreshTimers.values) {
+      timer?.cancel();
+    }
+
+    // WebSocket bağlantılarını kapat
+    for (final roomId in _roomWebSockets.keys.toList()) {
+      try {
+        _roomWebSockets[roomId]?.sink.close();
+      } catch (e) {
+        print('Error closing WebSocket for room $roomId: $e');
+      }
+    }
+
     super.dispose();
   }
 }

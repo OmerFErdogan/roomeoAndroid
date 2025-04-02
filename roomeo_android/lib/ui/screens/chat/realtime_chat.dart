@@ -1,13 +1,25 @@
 // lib/ui/screens/chat/realtime_chat.dart
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart'; // Add this dependency to pubspec.yaml
 import '../../../data/models/message.dart';
 import '../../../providers/message_provider.dart';
 import '../../../providers/auth_provider.dart';
 import '../../../core/utils/message_event_bus.dart';
 import '../../shared/widgets/modern_message_bubble.dart';
 import '../../shared/styles/modern_theme.dart';
+
+/// A model for pending messages with client ID
+class PendingMessage {
+  final String clientId;
+  final Message message;
+  final DateTime sentAt;
+
+  PendingMessage(
+      {required this.clientId, required this.message, required this.sentAt});
+}
 
 class RealtimeChat extends StatefulWidget {
   final int roomId;
@@ -21,17 +33,28 @@ class RealtimeChat extends StatefulWidget {
   _RealtimeChatState createState() => _RealtimeChatState();
 }
 
-class _RealtimeChatState extends State<RealtimeChat> {
+class _RealtimeChatState extends State<RealtimeChat>
+    with AutomaticKeepAliveClientMixin {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
   StreamSubscription<MessageEvent>? _eventSubscription;
   Timer? _refreshTimer;
   bool _isInitialized = false;
 
+  // Track pending messages with their client IDs
+  final Map<String, PendingMessage> _pendingMessages = {};
+
+  // For generating UUIDs
+  final _uuid = Uuid();
+
+  @override
+  bool get wantKeepAlive => true;
+
   @override
   void initState() {
     super.initState();
-    // Ekran oluşturulduktan sonra mesajları yükle
+
+    // Initialize after build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initializeChat();
     });
@@ -43,12 +66,12 @@ class _RealtimeChatState extends State<RealtimeChat> {
     final messageProvider = context.read<MessageProvider>();
 
     try {
-      // Tüm mesajları yükle (eskiden olduğu gibi loadMessages yerine loadAllMessages kullan)
+      // Load existing messages
       await messageProvider.loadAllMessages(widget.roomId);
       print(
-          "All messages loaded. Count: ${messageProvider.getSortedMessagesForRoom(widget.roomId).length}");
+          "Messages loaded: ${messageProvider.getSortedMessagesForRoom(widget.roomId).length}");
 
-      // Event bus'tan gelen mesaj eventlerini dinle
+      // Set up EventBus listener
       final eventBus = MessageEventBus();
       _eventSubscription =
           eventBus.listenForRoom(widget.roomId).listen((event) {
@@ -57,36 +80,59 @@ class _RealtimeChatState extends State<RealtimeChat> {
 
         if (event.type == MessageEventType.received ||
             event.type == MessageEventType.sent) {
-          if (mounted) {
-            // ÖNEMLİ: Her mesaj olayında UI'ı güncelle
-            setState(() {
-              print('RealtimeChat: UI updated for event ${event.type}');
-            });
+          if (mounted && event.message != null) {
+            // Mesajı doğrudan kullan, içerik temizlemeye gerek yok
+            final message = event.message!;
 
-            // Ve ekranı aşağı kaydır
-            Future.delayed(Duration(milliseconds: 100), () {
-              if (mounted) _scrollToBottom();
-            });
+            // ClientId özelliğinden yararlan, mesaj içeriğini kurcalama
+            if (message.clientId != null && _pendingMessages.containsKey(message.clientId)) {
+              setState(() {
+                _pendingMessages.remove(message.clientId);
+                print('Removed pending message with clientId: ${message.clientId}');
+              });
+            }
+          }
+
+          // Update UI and scroll
+          if (mounted) {
+            setState(() {});
+            _scrollToBottom();
           }
         }
       });
 
-      // İlk yüklemeden sonra ekranı aşağı kaydır
-      if (mounted) {
-        Future.delayed(Duration(milliseconds: 300), () {
-          if (mounted) _scrollToBottom();
-        });
-      }
+      // Initial scroll
+      Future.delayed(Duration(milliseconds: 300), () {
+        if (mounted) _scrollToBottom();
+      });
 
-      // YENİ: Periyodik yenileme timer'ı başlat
-      _refreshTimer = Timer.periodic(Duration(seconds: 5), (_) {
+      // Set up periodic refresh - every 2 seconds to be more reasonable
+      _refreshTimer = Timer.periodic(Duration(seconds: 2), (_) {
         if (!mounted) return;
 
-        print('RealtimeChat: Auto-refreshing messages');
         messageProvider.refreshMessages(widget.roomId).then((_) {
-          // Yenilendikten sonra setState çağır
-          if (mounted) {
-            setState(() {});
+          if (!mounted) return;
+
+          // Process server messages to find any that match our pending messages
+          final messages =
+              messageProvider.getSortedMessagesForRoom(widget.roomId);
+
+          // Check for any recently confirmed messages that might match our pending ones
+          if (_pendingMessages.isNotEmpty) {
+            setState(() {
+              // Clean up any pending messages older than 5 minutes
+              // This prevents accumulation of "orphaned" pending messages
+              final now = DateTime.now();
+              _pendingMessages.removeWhere((clientId, pending) =>
+                  now.difference(pending.sentAt).inMinutes > 5);
+            });
+          }
+
+          setState(() {});
+
+          // Auto scroll if needed
+          if (_shouldAutoScroll()) {
+            _scrollToBottom();
           }
         });
       });
@@ -106,16 +152,27 @@ class _RealtimeChatState extends State<RealtimeChat> {
     super.dispose();
   }
 
+  bool _shouldAutoScroll() {
+    if (!_scrollController.hasClients) return true;
+
+    final position = _scrollController.position;
+    final maxScroll = position.maxScrollExtent;
+    final currentScroll = position.pixels;
+    return (maxScroll - currentScroll) <= 150.0;
+  }
+
   void _scrollToBottom() {
-    if (!mounted) return;
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
-      print("Scrolled to bottom");
-    }
+    if (!mounted || !_scrollController.hasClients) return;
+
+    Future.delayed(Duration(milliseconds: 100), () {
+      if (mounted && _scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   Future<void> _sendMessage() async {
@@ -123,38 +180,51 @@ class _RealtimeChatState extends State<RealtimeChat> {
     if (content.isEmpty) return;
 
     try {
-      // Önce metin alanını temizleyelim ki kullanıcı tıklama anında geri bildirim alsın
+      // Clear input field immediately
       _messageController.clear();
 
-      // Kullanıcı bilgilerini al
+      // Get user info
       final currentUser =
           Provider.of<AuthProvider>(context, listen: false).currentUser;
-      int userId = currentUser?.id ?? -1;
-      String username = currentUser?.username ?? 'Ben';
+      final userId = currentUser?.id ?? -1;
+      final username = currentUser?.username ?? 'Ben';
 
-      // MessageProvider üzerinden mesajı gönder
-      await context.read<MessageProvider>().sendMessage(
+      // Generate a proper UUID for client ID
+      final clientId = _uuid.v4(); // Generates a UUIDv4
+
+      // Create local message with temporary ID
+      final localMessage = Message(
+        messageId: -DateTime.now().millisecondsSinceEpoch,
+        roomId: widget.roomId,
+        userId: userId,
+        username: username,
+        content: content,
+        messageType: 'text',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        clientId: clientId, // Doğrudan clientId'yi Message nesnesine ekle
+      );
+
+      // Store in pending messages map
+      final pendingMessage = PendingMessage(
+          clientId: clientId, message: localMessage, sentAt: DateTime.now());
+
+      // Update UI
+      setState(() {
+        _pendingMessages[clientId] = pendingMessage;
+      });
+
+      // Scroll to show new message
+      _scrollToBottom();
+
+      // Doğrudan sendMessageWithClientId metodunu kullan
+      await context.read<MessageProvider>().sendMessageWithClientId(
             widget.roomId,
             content,
+            clientId,
             userId: userId,
             username: username,
           );
-
-      print("sendMessage() completed");
-
-      // Ekranı hemen güncelle
-      if (mounted) {
-        setState(() {
-          print('UI updated after sending message');
-        });
-      }
-
-      // Ekranı aşağı kaydır
-      if (mounted) {
-        Future.delayed(Duration(milliseconds: 50), () {
-          _scrollToBottom();
-        });
-      }
     } catch (e) {
       print('Error sending message: $e');
       if (mounted) {
@@ -168,12 +238,25 @@ class _RealtimeChatState extends State<RealtimeChat> {
     }
   }
 
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+
+    return Column(
+      children: [
+        Expanded(child: _buildMessageList()),
+        _buildMessageInput(),
+      ],
+    );
+  }
+
   Widget _buildMessageList() {
     return Container(
       color: ModernTheme.backgroundLight,
       child: Consumer<MessageProvider>(
         builder: (context, messageProvider, child) {
-          if (messageProvider.isLoadingForRoom(widget.roomId)) {
+          if (messageProvider.isLoadingForRoom(widget.roomId) &&
+              _pendingMessages.isEmpty) {
             return Center(
               child: CircularProgressIndicator(
                 valueColor: AlwaysStoppedAnimation<Color>(ModernTheme.primary),
@@ -181,11 +264,50 @@ class _RealtimeChatState extends State<RealtimeChat> {
             );
           }
 
-          final messages =
+          // Get server messages
+          final serverMessages =
               messageProvider.getSortedMessagesForRoom(widget.roomId);
-          print("UI Message count: ${messages.length}");
 
-          if (messages.isEmpty) {
+          // Filter out system messages for the current user if needed
+          final currentUser =
+              Provider.of<AuthProvider>(context, listen: false).currentUser;
+          final filteredMessages = serverMessages.where((msg) {
+            if (msg.messageType == 'system' && currentUser != null) {
+              if ((msg.content.contains("joined the room") ||
+                      msg.content.contains("left the room")) &&
+                  msg.userId == currentUser.id) {
+                return false; // Filter out join/leave messages for current user
+              }
+            }
+            
+            return true;
+          }).toList();
+
+          // Create list of all messages to display
+          final List<Message> displayMessages = [...filteredMessages];
+
+          // Create set of server message IDs to avoid duplicates
+          final Set<int> serverIds =
+              filteredMessages.map((m) => m.messageId).toSet();
+          
+          // Create set of clientIds to avoid duplicates
+          final Set<String?> serverClientIds = filteredMessages
+              .where((m) => m.clientId != null)
+              .map((m) => m.clientId)
+              .toSet();
+
+          // Add pending messages that don't have matching server IDs or clientIds
+          for (final pending in _pendingMessages.values) {
+            // Sadece clientId kontrolü yap - daha güvenilir
+            if (!serverClientIds.contains(pending.clientId)) {
+              displayMessages.add(pending.message);
+            }
+          }
+
+          // Sort by timestamp
+          displayMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+          if (displayMessages.isEmpty) {
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -215,20 +337,57 @@ class _RealtimeChatState extends State<RealtimeChat> {
           return ListView.builder(
             controller: _scrollController,
             padding: EdgeInsets.all(16),
-            itemCount: messages.length,
+            itemCount: displayMessages.length,
             itemBuilder: (context, index) {
-              final message = messages[index];
+              final message = displayMessages[index];
               final showDate = index == 0 ||
                   !_isSameDay(
-                    messages[index - 1].createdAt,
+                    displayMessages[index - 1].createdAt,
                     message.createdAt,
                   );
+
+              // Check if message is pending
+              final isPending = message.messageId < 0;
+
               return Column(
                 children: [
                   if (showDate) _buildDateDivider(message.createdAt),
-                  ModernMessageBubble(
-                    message: message,
-                    displayTime: message.createdAt,
+                  Stack(
+                    children: [
+                      ModernMessageBubble(
+                        message: message,
+                        displayTime: message.createdAt,
+                      ),
+                      if (isPending)
+                        Positioned(
+                          bottom: 0,
+                          right: 0,
+                          child: Container(
+                            padding: EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.1),
+                                  spreadRadius: 1,
+                                  blurRadius: 2,
+                                ),
+                              ],
+                            ),
+                            child: SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  ModernTheme.primary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               );
@@ -354,16 +513,6 @@ class _RealtimeChatState extends State<RealtimeChat> {
           ),
         ],
       ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Expanded(child: _buildMessageList()),
-        _buildMessageInput(),
-      ],
     );
   }
 }

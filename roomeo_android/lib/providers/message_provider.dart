@@ -1,37 +1,38 @@
 // lib/providers/message_provider.dart
 import 'dart:async';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import '../data/models/message.dart';
 import '../data/repositories/message_repository.dart';
 import '../core/utils/message_event_bus.dart';
 
 class MessageProvider extends ChangeNotifier {
-  // Singleton pattern - tek bir instance oluşturalım
+  // Singleton pattern
   static final MessageProvider _instance = MessageProvider._internal();
   factory MessageProvider() => _instance;
 
-  // Özel constructor
+  // Private constructor
   MessageProvider._internal() {
     print('MessageProvider initialized as singleton');
   }
 
-  // Repository ve veri yapıları
+  // Repository and data structures
   final MessageRepository _repository = MessageRepository();
   final Map<int, List<Message>> _roomMessages = {};
   final Map<int, bool> _isLoadingMap = {};
   String? _error;
 
-  // Her oda için event subscription'ları saklayacağız
+  // Event subscriptions by room
   final Map<int, StreamSubscription<MessageEvent>> _subscriptions = {};
 
-  // Her oda için son yenileme zamanını takip et
+  // Last refresh times by room
   final Map<int, DateTime> _lastRefreshTimes = {};
 
-  // Filtreli mesajlar getiren metod - joined/left mesajlarını hariç
+  // Get filtered messages for a room - exclude empty and join/leave messages
   List<Message> getMessagesForRoom(int roomId) {
     final allMessages = _roomMessages[roomId] ?? [];
 
-    // İçeriği boş mesajları veya joined/left mesajlarını filtrele
+    // Filter out empty messages or join/leave system messages
     return allMessages
         .where((message) =>
             message.content.trim().isNotEmpty &&
@@ -44,7 +45,7 @@ class MessageProvider extends ChangeNotifier {
   bool isLoadingForRoom(int roomId) => _isLoadingMap[roomId] ?? false;
   String? get error => _error;
 
-  // Sıralı mesajları almak için metod
+  // Get sorted messages for a room
   List<Message> getSortedMessagesForRoom(int roomId) {
     final messages = getMessagesForRoom(roomId);
     final sorted = List<Message>.from(messages)
@@ -52,7 +53,7 @@ class MessageProvider extends ChangeNotifier {
     return sorted;
   }
 
-  // Oda mesajlarını yükle ve dinlemeye başla
+  // Load messages for a room and start listening
   Future<void> loadMessages(int roomId) async {
     if (_isLoadingMap[roomId] == true) return;
 
@@ -63,10 +64,10 @@ class MessageProvider extends ChangeNotifier {
     try {
       final messages = await _repository.getRoomMessages(roomId, limit: 100);
 
-      // Mesajları sırala
+      // Sort messages by creation time
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
-      // Mesajları filtrele - join/leave mesajlarını çıkar
+      // Filter out join/leave messages
       final filteredMessages = messages
           .where((message) =>
               message.content.trim().isNotEmpty &&
@@ -79,10 +80,10 @@ class MessageProvider extends ChangeNotifier {
       print(
           'Loaded ${filteredMessages.length} messages for room $roomId (filtered from ${messages.length})');
 
-      // Event Bus üzerinden mesajları dinlemeye başla
+      // Start listening for messages via EventBus
       _listenForMessages(roomId);
 
-      // Son yenileme zamanını kaydet
+      // Record last refresh time
       _lastRefreshTimes[roomId] = DateTime.now();
     } catch (e) {
       _error = e.toString();
@@ -93,7 +94,7 @@ class MessageProvider extends ChangeNotifier {
     }
   }
 
-  // Tüm eski mesajlar dahil yükleme
+  // Load all messages including historical ones
   Future<void> loadAllMessages(int roomId) async {
     if (_isLoadingMap[roomId] == true) return;
 
@@ -102,33 +103,33 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // İlk yükleme - son 100 mesaj
+      // Initial load - last 100 messages
       final initialMessages =
           await _repository.getRoomMessages(roomId, limit: 100);
 
-      // Mesajları sırala
+      // Sort messages
       initialMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
-      // Eğer 100'den az mesaj varsa, tüm mesajlar yüklenmiş demektir
+      // If fewer than 100 messages, we've got all of them
       if (initialMessages.length < 100) {
         _roomMessages[roomId] = initialMessages;
         print(
             'Loaded all messages (${initialMessages.length}) for room $roomId');
       } else {
-        // Eğer daha fazla mesaj varsa, tarihe göre daha eski mesajları yükle
-        // En eski mesajı bul
+        // If more messages exist, load older ones too
+        // Find the oldest message
         final oldestMessage = initialMessages
             .reduce((a, b) => a.createdAt.isBefore(b.createdAt) ? a : b);
 
-        // Daha eski mesajları yükle
+        // Load older messages
         final olderMessages = await _repository.getRoomMessages(roomId,
-            limit: 300, // Eski mesajlardan daha fazla al
+            limit: 300, // Get more older messages
             before: oldestMessage.createdAt);
 
-        // Tüm mesajları birleştir
+        // Combine all messages
         final allMessages = [...initialMessages, ...olderMessages];
 
-        // Mesajları sırala
+        // Sort by timestamp
         allMessages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
         _roomMessages[roomId] = allMessages;
@@ -136,10 +137,10 @@ class MessageProvider extends ChangeNotifier {
             'Loaded ${allMessages.length} messages in total for room $roomId');
       }
 
-      // Event Bus üzerinden mesajları dinlemeye başla
+      // Start listening for messages via EventBus
       _listenForMessages(roomId);
 
-      // Son yenileme zamanını kaydet
+      // Record last refresh time
       _lastRefreshTimes[roomId] = DateTime.now();
     } catch (e) {
       _error = e.toString();
@@ -150,17 +151,17 @@ class MessageProvider extends ChangeNotifier {
     }
   }
 
-  // Mesaj dinlemeyi başlat
+  // Start listening for messages
   void _listenForMessages(int roomId) {
-    // Önceki subscription varsa iptal et
+    // Cancel previous subscription if it exists
     _subscriptions[roomId]?.cancel();
 
-    // Yeni bir subscription oluştur
+    // Create new subscription
     final eventBus = MessageEventBus();
     _subscriptions[roomId] = eventBus.listenForRoom(roomId).listen((event) {
       print('MessageProvider: Received event ${event.type} for room $roomId');
 
-      // Mesaj türüne göre işlem yap
+      // Process event by type
       switch (event.type) {
         case MessageEventType.received:
           if (event.message != null) {
@@ -173,9 +174,9 @@ class MessageProvider extends ChangeNotifier {
           }
           break;
         case MessageEventType.deleted:
-          // Mesaj silme işlemi burada yapılacak
+          // Handle message deletion here
           break;
-        // Diğer eventleri şimdilik görmezden gel
+        // Ignore other events for now
         case MessageEventType.userJoined:
         case MessageEventType.userLeft:
         case MessageEventType.roomUpdated:
@@ -186,17 +187,17 @@ class MessageProvider extends ChangeNotifier {
     print('Started listening for messages in room $roomId');
   }
 
-  // Yerel mesajı hemen ekle - ANINDA gösterim için
+  // Add a local message immediately - for INSTANT display
   void addLocalMessage(int roomId, Message localMessage) {
     if (!_roomMessages.containsKey(roomId)) {
       _roomMessages[roomId] = [];
     }
 
-    // Önce yerel mesajı ekle
+    // Add local message first
     _roomMessages[roomId] = [..._roomMessages[roomId]!, localMessage];
     _roomMessages[roomId]!.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
-    // Event Bus'a da yayınla
+    // Publish to EventBus as well
     final eventBus = MessageEventBus();
     eventBus.publish(MessageEvent(
       type: MessageEventType.sent,
@@ -204,10 +205,10 @@ class MessageProvider extends ChangeNotifier {
       message: localMessage,
     ));
 
-    // UI'ı ANINDA güncelle
+    // Update UI IMMEDIATELY
     notifyListeners();
 
-    // Kısa bir gecikme ile tekrar notifyListeners() çağır - UI güncellemesini garanti et
+    // Call notifyListeners again after a short delay to ensure UI updates
     Future.delayed(Duration(milliseconds: 50), () {
       notifyListeners();
     });
@@ -215,75 +216,133 @@ class MessageProvider extends ChangeNotifier {
     print('LOCAL message instantly added to UI: ${localMessage.content}');
   }
 
-  // Arka planda mesaj gönderme - UI güncellemeyi beklemeden
+  // Send message in background - don't wait for UI updates
   Future<void> sendMessageBackground(
     int roomId,
     String content, {
     int? userId,
     String? username,
     Message? localMessage,
+    String? clientId,
   }) async {
     try {
       print('Background: Sending message to room $roomId: $content');
 
-      // API'ye gönder - 5 saniyeye kadar bekle ama UI bloklanmasın
+      // Send to API - wait up to 2 seconds but don't block UI
       final serverMessage = await _repository
           .sendMessage(roomId, content)
-          .timeout(Duration(seconds: 5), onTimeout: () {
-        print('Background: API call timed out after 5 seconds');
+          .timeout(Duration(seconds: 2), onTimeout: () {
+        print('Background: API call timed out after 2 seconds');
         throw TimeoutException('Message sending timed out');
       });
 
       print(
           'Background: Message successfully sent to server with ID: ${serverMessage.messageId}');
 
-      // Yerel mesajı sunucu mesajı ile değiştir (eğer varsa)
-      if (localMessage != null) {
-        _replaceTemporaryMessage(roomId, localMessage, serverMessage);
-        print('Background: Replaced local message with server message');
+      // Add clientId to server message if it was provided
+      Message messageToAdd = serverMessage;
+      if (clientId != null) {
+        messageToAdd = Message(
+          messageId: serverMessage.messageId,
+          roomId: serverMessage.roomId,
+          userId: serverMessage.userId,
+          username: serverMessage.username,
+          content: serverMessage.content,
+          messageType: serverMessage.messageType,
+          createdAt: serverMessage.createdAt,
+          updatedAt: serverMessage.updatedAt,
+          isDeleted: serverMessage.isDeleted,
+          clientId: clientId,
+        );
       }
 
-      // Sunucudan gelen mesajı event bus'a yayınla
+      // Replace local message with server message if needed
+      if (localMessage != null) {
+        _replaceTemporaryMessage(roomId, localMessage, messageToAdd);
+        print('Background: Replaced local message with server message');
+      } else {
+        // If no local message provided, add the server message directly
+        _addMessageToRoom(roomId, messageToAdd);
+      }
+
+      // Publish server message to EventBus
       final eventBus = MessageEventBus();
       eventBus.publish(MessageEvent(
         type:
-            MessageEventType.received, // received kullanıyoruz, serverdan geldi
+            MessageEventType.received, // Using received since it's from server
         roomId: roomId,
-        message: serverMessage,
+        message: messageToAdd,
       ));
     } catch (e) {
       print('Background error sending message: $e');
-      // Sunucuya mesaj gönderilemediyse bile UI'da yerel mesaj halen görünür olur
+      // Local message will still be visible in UI even if server send fails
     }
   }
 
-  // Yeni mesaj gönderme - UI'da ANINDA görünme ve arka planda gönderme
+  // NEW: Send message with client ID for proper tracking
+  // Update in message_provider.dart
+  Future<void> sendMessageWithClientId(
+    int roomId,
+    String content,
+    String clientId, {
+    int? userId,
+    String? username,
+  }) async {
+    if (content.trim().isEmpty) return;
+
+    try {
+      print('MessageProvider: Sending message with clientId: $clientId');
+      
+      // Create local message with client ID
+      final localMessage = Message(
+        messageId: -999,
+        roomId: roomId,
+        userId: userId ?? -1,
+        username: username ?? 'Ben',
+        content: content, // Saf içerik, client ID eklenmedi
+        messageType: 'text',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        clientId: clientId, // Include clientId
+      );
+
+      // IMMEDIATELY add local message for instant UI update
+      addLocalMessage(roomId, localMessage);
+      
+      // Send in background with clientId for tracking
+      sendMessageBackground(
+        roomId, 
+        content, // Saf içerik, client ID eklenmedi
+        userId: userId,
+        username: username,
+        localMessage: localMessage,
+        clientId: clientId
+      );
+    } catch (e) {
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+
+  // Send a message - IMMEDIATELY visible in UI, backward compatibility method
   Future<void> sendMessage(int roomId, String content,
       {int? userId, String? username}) async {
     if (content.trim().isEmpty) return;
 
     try {
-      print('MessageProvider: Sending message to room $roomId: $content');
+      print('MessageProvider: Sending message to room $roomId: $content (legacy method)');
 
-      // Yerel mesaj nesnesi oluştur
-      final localMessage = Message(
-        messageId: -999, // Geçici ID
-        roomId: roomId,
-        userId: userId ?? -1,
-        username: username ?? 'Ben', // Varsayılan değer
-        content: content,
-        messageType: 'text',
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
+      // Generate a client ID
+      final clientId = DateTime.now().millisecondsSinceEpoch.toString();
+      
+      // Use the clientId-based implementation
+      return sendMessageWithClientId(
+        roomId,
+        content,
+        clientId,
+        userId: userId,
+        username: username,
       );
-
-      // HEMEN yerel mesajı ekle - anında UI güncellemesi
-      addLocalMessage(roomId, localMessage);
-      print('MessageProvider: Added local message to UI: $content');
-
-      // ARKA PLANDA göndermeyi başlat - UI'ı bloklamaz
-      sendMessageBackground(roomId, content,
-          userId: userId, username: username, localMessage: localMessage);
     } catch (e) {
       _error = e.toString();
       print('Error in sendMessage flow: $_error');
@@ -291,9 +350,9 @@ class MessageProvider extends ChangeNotifier {
     }
   }
 
-  // Mesajı odaya ekle
+  // Add message to room
   void _addMessageToRoom(int roomId, Message message) {
-    // Join/leave mesajlarını filtrele
+    // Filter join/leave messages
     if (message.messageType == 'system' &&
         (message.content.contains('joined the room') ||
             message.content.contains('left the room'))) {
@@ -305,28 +364,33 @@ class MessageProvider extends ChangeNotifier {
       _roomMessages[roomId] = [];
     }
 
-    // Duplicate kontrolü: aynı mesajID'ye sahip (geçici olmayan) mesaj varsa ekleme
+    // Duplicate check: don't add if a non-temporary message with same ID exists
     final isDuplicate = _roomMessages[roomId]!.any((m) =>
         m.messageId == message.messageId &&
         m.messageId != -999 &&
         m.messageId != -1);
 
-    if (!isDuplicate) {
+    // Also check for client ID match to prevent duplicates
+    final isClientIdDuplicate = message.clientId != null &&
+        _roomMessages[roomId]!
+            .any((m) => m.clientId != null && m.clientId == message.clientId);
+
+    if (!isDuplicate && !isClientIdDuplicate) {
       _roomMessages[roomId] = [..._roomMessages[roomId]!, message];
       _roomMessages[roomId]!.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       print('Added message to room $roomId: ${message.content}');
 
-      // Kritik: Her mesaj eklendiğinde UI'ı güncelle
+      // Critical: Update UI for each added message
       notifyListeners();
 
-      // Kısa bir gecikme ile tekrar UI güncellemesi yap - bazı UI sorunlarını çözer
+      // Call notifyListeners again after a short delay to fix UI issues
       Future.delayed(Duration(milliseconds: 50), () {
         notifyListeners();
       });
     }
   }
 
-  // Geçici mesajı sunucu yanıtıyla değiştir
+  // Replace temporary message with server response
   void _replaceTemporaryMessage(
       int roomId, Message tempMessage, Message serverMessage) {
     if (!_roomMessages.containsKey(roomId)) return;
@@ -334,10 +398,31 @@ class MessageProvider extends ChangeNotifier {
     print(
         'Replacing temporary message ID=${tempMessage.messageId} with server message ID=${serverMessage.messageId}');
 
+    // First try to match by client ID if available
+    if (tempMessage.clientId != null && serverMessage.clientId != null) {
+      final updatedMessages = _roomMessages[roomId]!.map((m) {
+        if (m.clientId == tempMessage.clientId) {
+          print(
+              'Found match by clientId, replacing local message with server message');
+          return serverMessage;
+        }
+        return m;
+      }).toList();
+
+      _roomMessages[roomId] = updatedMessages;
+      
+      // Update UI IMMEDIATELY
+      notifyListeners();
+      
+      return; // Exit early if we found and replaced by clientId
+    }
+
+    // Fall back to content matching if no client ID
     final updatedMessages = _roomMessages[roomId]!.map((m) {
       if (m.messageId == tempMessage.messageId &&
           m.content == tempMessage.content) {
-        print('Found match, replacing local message with server message');
+        print(
+            'Found match by content, replacing local message with server message');
         return serverMessage;
       }
       return m;
@@ -345,21 +430,16 @@ class MessageProvider extends ChangeNotifier {
 
     _roomMessages[roomId] = updatedMessages;
 
-    // UI'ı güncelle
+    // Update UI IMMEDIATELY
     notifyListeners();
-
-    // Kısa bir gecikme ile tekrar UI güncellemesi yap
-    Future.delayed(Duration(milliseconds: 50), () {
-      notifyListeners();
-    });
   }
 
-  // WebSocket üzerinden yeni mesaj ekle
+  // Add WebSocket message - backward compatibility method
   void addWebSocketMessage(int roomId, Message message) {
     print(
         'MessageProvider: Processing WebSocket message for room $roomId: ${message.content}');
 
-    // EventBus üzerinden yayınla
+    // Publish via EventBus
     final eventBus = MessageEventBus();
     eventBus.publish(MessageEvent(
       type: MessageEventType.received,
@@ -367,31 +447,30 @@ class MessageProvider extends ChangeNotifier {
       message: message,
     ));
 
-    // Ayrıca doğrudan odaya da ekle
+    // Also add directly to room
     _addMessageToRoom(roomId, message);
 
-    // UI'ı tekrar güncelle
+    // Update UI immediately
     notifyListeners();
 
     print('MessageProvider: WebSocket message processed');
   }
 
-  // Tüm mesajları yenile - her 2 saniyede bir çağrılabilir
+  // Refresh messages - can be called every few seconds
   Future<void> refreshMessages(int roomId) async {
-    // Son yenilemeden bu yana geçen süreyi kontrol et, çok sık yenileme yapma
+    // Check time since last refresh, don't refresh too frequently
     final lastRefresh = _lastRefreshTimes[roomId] ??
         DateTime.now().subtract(Duration(minutes: 1));
     final timeSinceLastRefresh = DateTime.now().difference(lastRefresh);
 
-    // En az 1 saniye geçtiyse yenile
-    if (timeSinceLastRefresh.inMilliseconds < 1000) {
-      //print('Too soon to refresh messages for room $roomId, skipping');
+    // Refresh only if at least 500ms has passed (previously 1000ms)
+    if (timeSinceLastRefresh.inMilliseconds < 500) {
       return;
     }
 
     try {
       print('Refreshing messages for room $roomId');
-      _lastRefreshTimes[roomId] = DateTime.now(); // Şimdi yenilediğimizi kaydet
+      _lastRefreshTimes[roomId] = DateTime.now(); // Record refresh time
 
       final messages = await _repository.getRoomMessages(roomId, limit: 50);
 
@@ -400,19 +479,28 @@ class MessageProvider extends ChangeNotifier {
         return;
       }
 
-      // Yeni mesajları ekle
+      // Add new messages
       bool anyNewMessages = false;
       for (final message in messages) {
-        // Mesaj halihazırda varsa atlayın
-        if (_roomMessages[roomId]?.any((m) =>
-                m.messageId == message.messageId &&
-                message.messageId != -999 &&
-                message.messageId != -1) ??
-            false) {
+        // Skip if message already exists by ID
+        bool exists = _roomMessages[roomId]?.any((m) => 
+            (m.messageId == message.messageId && 
+             message.messageId != -999 && 
+             message.messageId != -1)) ?? false;
+             
+        // Skip if message exists by clientId
+        bool existsByClientId = false;
+        if (message.clientId != null) {
+          existsByClientId = _roomMessages[roomId]?.any((m) => 
+              m.clientId != null && 
+              m.clientId == message.clientId) ?? false;
+        }
+        
+        if (exists || existsByClientId) {
           continue;
         }
 
-        // Yeni mesajı ekle
+        // Add new message
         _addMessageToRoom(roomId, message);
         anyNewMessages = true;
       }
@@ -426,7 +514,7 @@ class MessageProvider extends ChangeNotifier {
     }
   }
 
-  // Oda mesajlarını temizle
+  // Clear messages for a room
   void clearMessages(int roomId) {
     _roomMessages.remove(roomId);
     _isLoadingMap.remove(roomId);

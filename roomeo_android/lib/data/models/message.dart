@@ -1,14 +1,16 @@
-// lib/data/models/message.dart
+// Extend your Message class in lib/data/models/message.dart
+
 class Message {
   final int messageId;
   final int roomId;
   final int userId;
-  final String username; // API'den doğrudan geliyor
+  final String username;
   final String content;
   final String messageType;
   final DateTime createdAt;
   final DateTime updatedAt;
   final bool isDeleted;
+  final String? clientId; // Add this field to support client ID tracking
 
   Message({
     required this.messageId,
@@ -20,14 +22,15 @@ class Message {
     required this.createdAt,
     required this.updatedAt,
     this.isDeleted = false,
+    this.clientId, // Added optional client ID
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
     try {
       return Message(
-        messageId: json['message_id'] ?? -1, // Null güvenli
-        roomId: json['room_id'] ?? -1, // Null güvenli
-        userId: json['user_id'] ?? -1, // Null güvenli
+        messageId: json['message_id'] ?? -1,
+        roomId: json['room_id'] ?? -1,
+        userId: json['user_id'] ?? -1,
         username: json['username'] ?? 'Anonim',
         content: json['content'] ?? '',
         messageType: json['message_type'] ?? 'text',
@@ -36,11 +39,12 @@ class Message {
         updatedAt: DateTime.parse(
             json['updated_at'] ?? DateTime.now().toIso8601String()),
         isDeleted: json['is_deleted'] ?? false,
+        clientId: json['client_id'], // Extract client ID if present
       );
     } catch (e) {
       print('Message parsing error: $e');
       print('Raw JSON: $json');
-      // Hata durumunda varsayılan bir mesaj döndür
+      // Return default message on error
       return Message(
         messageId: -1,
         roomId: -1,
@@ -66,10 +70,11 @@ class Message {
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
       'is_deleted': isDeleted,
+      'client_id': clientId, // Include client ID in JSON
     };
   }
 
-  // System mesajları için factory constructor
+  // System message factory constructor
   factory Message.system({
     required int roomId,
     required String content,
@@ -78,7 +83,7 @@ class Message {
   }) {
     final now = DateTime.now();
     return Message(
-      messageId: -1, // System mesajları için özel ID
+      messageId: -1,
       roomId: roomId,
       userId: userId,
       username: username,
@@ -86,6 +91,33 @@ class Message {
       messageType: 'system',
       createdAt: now,
       updatedAt: now,
+    );
+  }
+
+  // Create a copy with optional parameter updates
+  Message copyWith({
+    int? messageId,
+    int? roomId,
+    int? userId,
+    String? username,
+    String? content,
+    String? messageType,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    bool? isDeleted,
+    String? clientId,
+  }) {
+    return Message(
+      messageId: messageId ?? this.messageId,
+      roomId: roomId ?? this.roomId,
+      userId: userId ?? this.userId,
+      username: username ?? this.username,
+      content: content ?? this.content,
+      messageType: messageType ?? this.messageType,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      isDeleted: isDeleted ?? this.isDeleted,
+      clientId: clientId ?? this.clientId,
     );
   }
 }

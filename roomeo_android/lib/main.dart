@@ -20,6 +20,58 @@ void main() async {
   runApp(MyApp(prefs: prefs));
 }
 
+// Uygulama yaşam döngüsü değişikliklerini global bir handler ile yönetelim
+class AppLifecycleManager extends StatefulWidget {
+  final Widget child;
+  
+  const AppLifecycleManager({
+    Key? key,
+    required this.child,
+  }) : super(key: key);
+  
+  @override
+  State<AppLifecycleManager> createState() => _AppLifecycleManagerState();
+}
+
+class _AppLifecycleManagerState extends State<AppLifecycleManager> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    // Uygulama yaşam döngüsü olaylarını dinlemeye başla
+    WidgetsBinding.instance.addObserver(this);
+  }
+  
+  @override
+  void dispose() {
+    // Dinlemeyi durdur
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Provider'ı bu context'te güvenli bir şekilde kullanabiliriz
+    final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+    
+    if (state == AppLifecycleState.paused || 
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.inactive) {
+      print('App lifecycle changed to $state - marking user inactive');
+      // Kullanıcıyı inaktif olarak işaretle
+      roomProvider.markUserAsInactive();
+    } else if (state == AppLifecycleState.resumed) {
+      // Uygulama tekrar öne geldiğinde, odaların bağlantı durumunu kontrol et
+      print('App resumed - checking connection status');
+      roomProvider.startConnectionHealthCheck();
+    }
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    return widget.child;
+  }
+}
+
 class MyApp extends StatelessWidget {
   final SharedPreferences prefs;
 
@@ -37,35 +89,46 @@ class MyApp extends StatelessWidget {
         ),
         ChangeNotifierProvider(
           create: (_) => RoomProvider(),
+          lazy: false, // RoomProvider'ı hızlıca başlat
         ),
         ChangeNotifierProvider(
           create: (_) => MessageProvider(),
         ),
       ],
-      child: MaterialApp(
-        title: 'Study Rooms',
-        debugShowCheckedModeBanner: false,
-        theme: ModernTheme.themeData, // Modern temayı kullanıyoruz
-        home: Consumer<AuthProvider>(
-          builder: (context, auth, _) =>
-              auth.isLoggedIn ? HomeScreen() : LoginScreen(),
+      // AppLifecycleManager tüm uygulamayı sarmalıyor
+      child: AppLifecycleManager(
+        child: MaterialApp(
+          title: 'Study Rooms',
+          debugShowCheckedModeBanner: false,
+          theme: ModernTheme.themeData, // Modern temayı kullanıyoruz
+          home: Consumer<AuthProvider>(
+            builder: (context, auth, _) {
+              // Kullanıcı girişi varsa, bağlantı durumu kontrolünü başlat
+              if (auth.isLoggedIn) {
+                final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+                // Uygulama başlangıcında bağlantı durumu kontrolünü başlat
+                Future.microtask(() => roomProvider.startConnectionHealthCheck());
+              }
+              return auth.isLoggedIn ? HomeScreen() : LoginScreen();
+            },
+          ),
+          routes: {
+            '/login': (context) => LoginScreen(),
+            '/register': (context) => RegisterScreen(),
+            '/home': (context) => HomeScreen(),
+            '/create-room': (context) => CreateRoomScreen(),
+            '/search-rooms': (context) => SearchRoomsScreen(),
+          },
+          onGenerateRoute: (settings) {
+            if (settings.name == '/room-detail') {
+              final room = settings.arguments as Room;
+              return MaterialPageRoute(
+                builder: (context) => RoomDetailScreen(room: room),
+              );
+            }
+            return null;
+          },
         ),
-        routes: {
-          '/login': (context) => LoginScreen(),
-          '/register': (context) => RegisterScreen(),
-          '/home': (context) => HomeScreen(),
-          '/create-room': (context) => CreateRoomScreen(),
-          '/search-rooms': (context) => SearchRoomsScreen(),
-        },
-        onGenerateRoute: (settings) {
-          if (settings.name == '/room-detail') {
-            final room = settings.arguments as Room;
-            return MaterialPageRoute(
-              builder: (context) => RoomDetailScreen(room: room),
-            );
-          }
-          return null;
-        },
       ),
     );
   }

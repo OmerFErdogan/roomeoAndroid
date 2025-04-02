@@ -331,4 +331,16 @@ class RoomRepository {
           e.response?.data?['error'] ?? 'Failed to get weekly trends');
     }
   }
+
+  // Oda katılımcılarının aktiflik durumunu zorla güncelle
+  Future<void> refreshRoomParticipants(int roomId) async {
+    try {
+      await _dio.post('/rooms/$roomId/refresh-participants');
+      print('Sent refresh participants request for room $roomId');
+    } on DioException catch (e) {
+      print('Error refreshing participants: ${e.response?.data}');
+      throw NetworkException(
+          e.response?.data?['error'] ?? 'Failed to refresh participants');
+    }
+  }
 }
